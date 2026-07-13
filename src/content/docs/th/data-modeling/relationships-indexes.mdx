@@ -1,0 +1,138 @@
+---
+title: Relationships & Indexes
+description: "การตัดสินใจ reference กับ embed, Mongoose populate สำหรับความสัมพันธ์ author และเหตุผลที่แต่ละ index บน Post และ Comment มีอยู่ — จับคู่กับ query ที่มันรองรับ"
+sidebar:
+  order: 2
+---
+
+## What we're building
+
+การตัดสินใจสำหรับความสัมพันธ์แต่ละคู่ระหว่างสี่ schema จาก [Schemas](/devblog/th/data-modeling/schemas/) — reference หรือ embed — บวกกับ `populate` call และ index ที่ทำให้ query pattern จริงของแต่ละความสัมพันธ์เร็วขึ้น
+
+| ความสัมพันธ์ | สร้างเป็น | resolve ด้วย |
+|---|---|---|
+| `Post.author` → `User` | reference (`ObjectId`, `ref: 'User'`) | `.populate('author', ...)` |
+| `Comment.post` → `Post` | reference (`ObjectId`, `ref: 'Post'`) | query ตรง ๆ: `Comment.find({ post })` |
+| `Post.tags` → `Tag` | **ไม่ใช่** reference — denormalized `string[]` ของ slug | ไม่มี `populate`; อ่านตรงจาก `Post`|
+
+## Why
+
+ทุก reference ใน DevBlog มีอยู่เพราะ entity ที่ถูก reference มี identity และ lifecycle ของตัวเองแยกจาก document ที่ชี้ไปหามัน: บัญชี `User` อยู่ยืนยาวกว่าโพสต์เดี่ยว ๆ ที่มันเขียน และ `Post` อยู่ยืนยาวกว่า (และโตกว่า) comment เดี่ยว ๆ บนมัน `Post.tags` คือความสัมพันธ์เดียวในแผนภาพที่จริง ๆ แล้วไม่ใช่ความสัมพันธ์ในระดับฐานข้อมูลเลย — มันคือข้อมูล denormalized ธรรมดา ๆ ที่เลือกไว้ในบทเรียนก่อนหน้าเพราะ tag เล็ก มีขอบเขตจำกัด และถูกอ่านพร้อมกับโพสต์เสมอ
+
+Index มีอยู่ด้วยเหตุผลเดียวกับที่ reference มีอยู่: เพื่อทำให้ query ที่เจาะจง รู้อยู่แล้ว และเกิดบ่อยเร็วขึ้น ทุก index ด้านล่างผูกกับ query pattern ที่ DevBlog รันจริง ไม่ใช่ใส่ไว้แบบป้องกันเผื่อไว้
+
+## Pros & cons
+
+**Reference (`populate`) เทียบกับ embed ใช้กับ `author`** `Post.author` อาจ embed สำเนา `displayName` ของ author ไว้บนโพสต์โดยตรงก็ได้ — ไม่ต้องเรียก `populate` document เดียว อ่านครั้งเดียว ต้นทุนคือ ทันทีที่ author เปลี่ยน `displayName` ทุกโพสต์ที่เขาเคยเขียนจะแสดงชื่อเก่าจนกว่าคุณจะเขียน bulk-update ข้าม collection `posts` การ reference มีต้นทุนเพิ่มคือการ lookup อีกครั้งต่อการอ่านโพสต์หนึ่งครั้ง (บรรเทาด้วย `populate` ที่ทำ lookup นั้นให้คุณในอีก query เดียวแทนที่จะเป็นหนึ่ง query ต่อโพสต์) แต่ข้อมูลของ author จะอยู่ที่เดียวเสมอ — `User` — และเป็นข้อมูลปัจจุบันตลอด
+
+**`populate` เทียบกับสอง query แยกกัน** `.populate('author')` คือ Mongoose ทำ join ให้คุณ: หนึ่ง query สำหรับโพสต์ อีกหนึ่ง query ตามมาสำหรับ document `User` ที่ถูก reference แล้วรวมเข้าเป็นผลลัพธ์ที่คุณได้กลับมา นั่นยังเป็นสอง round trip ไปที่ MongoDB ไม่ใช่ relational `JOIN` เดียว — ดังนั้น `populate` ไม่ได้ฟรี แต่มันคือสอง query เดียวกับที่คุณจะเขียนเองด้วยมือ ห่อไว้ใน API ที่ยังให้คุณ project field ได้ด้วย (`.populate('author', 'displayName email')` ดึงมาแค่สอง field นั้นจาก `User` ที่ถูก reference ไม่ใช่ทั้ง document รวม `passwordHash`)
+
+**Read-vs-write tradeoff ของการทำ index** ทุก index ทำให้การอ่านที่กรองหรือเรียงตามมันเร็วขึ้น และทุก index ก็ทำให้การเขียนบน field นั้นช้าลง เพราะ MongoDB ต้องอัปเดต B-tree ของ index เองทุกครั้งที่ insert หรือ update — และทุก index ก็กิน disk กับ RAM เพิ่มในฐานะโครงสร้างแยกจากข้อมูลของ collection นั่นคือเหตุผลที่ index สี่ตัวด้านล่างแต่ละตัวผูกกับ query ที่เจาะจงและเกิดบ่อยหนึ่งตัว แทนที่จะประกาศไว้ทุก field "เผื่อไว้ก่อน": `Post` และ `Comment` ทั้งคู่ถูกอ่านบ่อยกว่าถูกเขียนมาก (การดูโพสต์สาธารณะหรือโหลด comment thread เกิดขึ้นทุกครั้งที่มีผู้เข้าชม การเขียนโพสต์หรือ comment ใหม่เกิดขึ้นไม่บ่อยเมื่อเทียบกัน) ดังนั้นการแลกต้นทุนการเขียนเล็กน้อยกับความเร็วในการอ่านที่เพิ่มขึ้นมากและคงที่จึงเป็นการตัดสินใจที่ถูกต้องที่นี่ field ที่ไม่มีใคร query จะไม่ได้ index ไม่ว่ามันจะถูกใช้ที่อื่นยังไงก็ตาม
+
+## Set it up
+
+### reference `author` ที่ resolve ด้วย `populate`
+
+การลงทะเบียน model ของ `Post` (ครอบคลุมเต็ม ๆ ใน [Backend Foundations](/devblog/th/backend-foundations/)) คือสิ่งที่ทำให้ `@InjectModel(Post.name)` ใช้งานได้:
+
+```ts
+// posts/posts.module.ts
+import { Module } from '@nestjs/common';
+import { MongooseModule } from '@nestjs/mongoose';
+import { Post, PostSchema } from './schemas/post.schema';
+
+@Module({
+  imports: [MongooseModule.forFeature([{ name: Post.name, schema: PostSchema }])],
+})
+export class PostsModule {}
+```
+
+Service method ที่ดึงโพสต์ที่ published ตาม slug พร้อม populate author:
+
+```ts
+// posts/posts.service.ts
+import { Injectable } from '@nestjs/common';
+import { InjectModel } from '@nestjs/mongoose';
+import { Model } from 'mongoose';
+import { Post, PostDocument } from './schemas/post.schema';
+
+@Injectable()
+export class PostsService {
+  constructor(
+    @InjectModel(Post.name) private readonly postModel: Model<PostDocument>,
+  ) {}
+
+  findPublishedBySlug(slug: string) {
+    return this.postModel
+      .findOne({ slug, status: 'published' })
+      .populate('author', 'displayName email')
+      .exec();
+  }
+}
+```
+
+`.populate('author', 'displayName email')` ตาม `ObjectId` ของ `author` ไปที่ collection `User` แล้วสลับมันเป็น document ที่ตรงกัน โดย project ลงมาเหลือแค่ `displayName` กับ `email` — `passwordHash` และ `role` จะไม่ถูกดึงออกจากฐานข้อมูลเลยสำหรับ query นี้ (typing แบบ static ของ Mongoose ไม่ได้เปลี่ยน type ของ `author` จาก `Types.ObjectId` เป็น `User` ให้อัตโนมัติหลัง `populate`; โมดูลถัดไปจะ narrow return type อย่างชัดเจนตรงที่มันสำคัญ เช่นใน return shape ของ resolver GraphQL)
+
+`Comment.post` ไม่เคยถูก populate แบบเดียวกันใน query ของ comment thread — thread ถูกดึงมาโดยกรอง `Comment` ตรง ๆ (`Comment.find({ post: postId, status: 'approved' })`) เพราะผู้เรียกมีโพสต์อยู่แล้วและต้องการแค่ comment ไม่ต้องการข้อมูลโพสต์ซ้ำในทุก comment
+
+### เหตุผลที่แต่ละ index มีอยู่
+
+Index สี่ตัวเกิดจาก schema ในบทเรียนก่อนหน้า แต่ละตัวจับคู่กับ query จริงหนึ่งตัว:
+
+| Index | Field(s) | Query ที่มันรองรับ |
+|---|---|---|
+| `Post.slug` | `slug` (unique) | `Post.findOne({ slug })` — หน้ารายละเอียดโพสต์สาธารณะ query ที่เกิดบ่อยที่สุดในแอปทั้งหมด |
+| `Post.status` | `status` | `Post.find({ status: 'published' })` — list โพสต์สาธารณะ; admin list query ทั้งสองค่า |
+| `Comment.post` | `post` | `Comment.find({ post: postId })` — การโหลด comment thread ของโพสต์ |
+| `Comment.status` | `status` | `Comment.find({ status: 'pending' })` — คิว moderation ของ admin ข้ามทุกโพสต์ |
+
+บน `Post.slug` สังเกตว่า `unique: true` เพียงอย่างเดียวก็ทำให้ Mongoose สร้าง unique index อยู่แล้ว — `index: true` ที่ต่อกันมาชัดเจนและบันทึกความตั้งใจไว้ แต่มันไม่ได้สร้าง index ตัวที่สอง คุณยังคงได้ index บน `slug` แค่ตัวเดียว
+
+### Compound index สำหรับ comment thread
+
+`Comment.status` เดี่ยว ๆ รองรับคิว moderation (`status: 'pending'` ไม่มีการกรอง `post`) แต่ query comment ที่เกิดบ่อยกว่ามากกรองทั้ง**สอง**field พร้อมกัน — `{ post: postId, status: 'approved' }` รันทุกครั้งที่โหลดหน้าโพสต์ MongoDB ตอบมันได้ด้วย index เดี่ยวสองตัวโดยการ intersect กัน แต่ compound index ตอบมันตรง ๆ ในการสแกน index ครั้งเดียว Mongoose ประกาศ compound index ด้วย `schema.index()` บน schema instance หลังจาก `SchemaFactory.createForClass`:
+
+```ts
+// comments/schemas/comment.schema.ts (addition, after the class above)
+export const CommentSchema = SchemaFactory.createForClass(Comment);
+CommentSchema.index({ post: 1, status: 1 });
+```
+
+ลำดับ field สำคัญ: `{ post: 1, status: 1 }` มีประสิทธิภาพสำหรับ query ที่กรองบน `post` อย่างเดียว หรือบน `post` **และ** `status` พร้อมกัน (query ของ comment thread) แต่ไม่ใช่สำหรับ query ที่กรองบน `status` อย่างเดียวโดยไม่มี `post` — นั่นคือเหตุผลที่ index เดี่ยวของ `status` จาก schema ยังคงอยู่ต่อไปเช่นกัน สำหรับคิว moderation ทั้งสอง index รวมกัน ไม่ใช่ตัวหนึ่งแทนที่อีกตัว ครอบคลุมทั้งสอง query pattern
+
+## Verify
+
+เมื่อ API รันอยู่กับ Mongo container ในเครื่องจาก [Compose skeleton](/devblog/th/setup/compose-skeleton/) Mongoose จะสร้างทุก index ที่ประกาศไว้ให้อัตโนมัติใน environment ที่ไม่ใช่ production ยืนยันมันโดยตรง:
+
+```bash
+docker compose exec mongo mongosh -u devblog -p devblog --authenticationDatabase admin devblog --eval "db.posts.getIndexes()"
+```
+
+```txt
+[
+  { v: 2, key: { _id: 1 }, name: '_id_' },
+  { v: 2, key: { slug: 1 }, name: 'slug_1', unique: true },
+  { v: 2, key: { status: 1 }, name: 'status_1' }
+]
+```
+
+```bash
+docker compose exec mongo mongosh -u devblog -p devblog --authenticationDatabase admin devblog --eval "db.comments.getIndexes()"
+```
+
+```txt
+[
+  { v: 2, key: { _id: 1 }, name: '_id_' },
+  { v: 2, key: { post: 1 }, name: 'post_1' },
+  { v: 2, key: { status: 1 }, name: 'status_1' },
+  { v: 2, key: { post: 1, status: 1 }, name: 'post_1_status_1' }
+]
+```
+
+การเห็น `slug_1` ระบุว่า `unique: true` และ `post_1_status_1` อยู่ควบคู่กับ index เดี่ยวสองตัวบน `comments` ยืนยันว่าทั้งสอง collection ถูก index ตรงตามที่บทเรียนนี้อธิบายไว้ทุกประการ
+
+## Recap
+
+`Post.author` และ `Comment.post` เป็น reference จริง resolve ด้วย `.populate()`; `Post.tags` เป็นข้อมูล denormalized ไม่ใช่ reference และไม่เคยถูก populate `populate` คือ Mongoose รัน query ที่สองให้คุณ พร้อม field projection เพื่อเลี่ยงการดึง field ที่อ่อนไหวอย่าง `passwordHash` ข้ามสาย Index สี่ตัว — `Post.slug` (unique), `Post.status`, `Comment.post`, `Comment.status` — แต่ละตัวตอบ query ที่เจาะจงและเกิดบ่อยหนึ่งตัว บวกกับ compound index `{ post: 1, status: 1 }` บน `Comment` สำหรับ query comment thread ที่กรองทั้งสอง field พร้อมกัน ทุก index แลกต้นทุนการเขียนกับความเร็วในการอ่าน เมื่อทั้ง `Post` และ `Comment` ถูกอ่านบ่อยกว่าถูกเขียนมาก การแลกนี้จึงคุ้มค่าที่นี่ เมื่อ schema ความสัมพันธ์ และ index ลงตัวแล้ว data model ก็มั่นคงพอที่จะสร้าง API ต่อยอดบนมัน
+
+ถัดไป: [Backend Foundations →](/devblog/th/backend-foundations/)

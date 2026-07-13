@@ -1,0 +1,138 @@
+---
+title: Relationships & Indexes
+description: "Reference vs embed decisions, Mongoose populate for the author relationship, and why each index on Post and Comment exists — mapped to the query it serves."
+sidebar:
+  order: 2
+---
+
+## What we're building
+
+A decision for each relationship between the four schemas from [Schemas](/devblog/en/data-modeling/schemas/) — reference or embed — plus the `populate` call and the indexes that make each relationship's real query pattern fast.
+
+| Relationship | Modeled as | Resolved with |
+|---|---|---|
+| `Post.author` → `User` | reference (`ObjectId`, `ref: 'User'`) | `.populate('author', ...)` |
+| `Comment.post` → `Post` | reference (`ObjectId`, `ref: 'Post'`) | queried directly: `Comment.find({ post })` |
+| `Post.tags` → `Tag` | **not** a reference — denormalized `string[]` of slugs | no `populate`; read straight off `Post` |
+
+## Why
+
+Every reference in DevBlog exists because the referenced entity has its own identity and lifecycle independent of the document pointing at it: a `User` account outlives any single post it authored, and a `Post` outlives (and outgrows) any single comment on it. `Post.tags` is the one relationship in the diagram that isn't really a relationship at the database level at all — it's plain denormalized data, chosen in the previous lesson because tags are small, bounded, and always read together with the post.
+
+Indexes exist for the same reason references do: to make a specific, known, frequent query fast. Every index below is tied to a query pattern DevBlog actually runs, not added defensively.
+
+## Pros & cons
+
+**Reference (`populate`) vs. embed, applied to `author`.** `Post.author` could have embedded a copy of the author's `displayName` directly on the post — no `populate` call, one document, one read. The cost: the moment an author changes their `displayName`, every post they ever wrote would show the stale name until you wrote a bulk-update across the `posts` collection. Referencing costs one extra lookup per post read (mitigated by `populate`, which does that lookup for you in a single follow-up query rather than one query per post), but the author's data only ever lives in one place — `User` — and is always current.
+
+**`populate` vs. two separate queries.** `.populate('author')` is Mongoose doing the join for you: one query for the post(s), one follow-up query for the referenced `User` document(s), merged into the result you get back. That's still two round trips to MongoDB, not a single relational `JOIN` — so `populate` isn't free, but it's the same two queries you'd write by hand, wrapped in an API that also lets you project fields (`.populate('author', 'displayName email')` fetches only those two fields off the referenced `User`, not the whole document including `passwordHash`).
+
+**Read-vs-write tradeoff of indexing.** Every index speeds up the reads that filter or sort on it, and every index slows down writes to that field, because MongoDB has to update the index's own B-tree on every insert or update — and every index consumes extra disk and RAM as a structure separate from the collection's data. That's why the four indexes below are each tied to one specific, frequent query rather than declared on every field "just in case": `Post` and `Comment` are both read far more often than they're written (a public post view or comment-thread load happens for every visitor; a new post or comment write happens rarely by comparison), so trading a small write cost for a large, constant read speedup is the right call here. A field nobody queries on doesn't get an index, no matter how it's used elsewhere.
+
+## Set it up
+
+### The `author` reference, resolved with `populate`
+
+Registering `Post`'s model (covered in full in [Backend Foundations](/devblog/en/backend-foundations/)) is what makes `@InjectModel(Post.name)` available:
+
+```ts
+// posts/posts.module.ts
+import { Module } from '@nestjs/common';
+import { MongooseModule } from '@nestjs/mongoose';
+import { Post, PostSchema } from './schemas/post.schema';
+
+@Module({
+  imports: [MongooseModule.forFeature([{ name: Post.name, schema: PostSchema }])],
+})
+export class PostsModule {}
+```
+
+A service method fetching a published post by slug, with its author populated:
+
+```ts
+// posts/posts.service.ts
+import { Injectable } from '@nestjs/common';
+import { InjectModel } from '@nestjs/mongoose';
+import { Model } from 'mongoose';
+import { Post, PostDocument } from './schemas/post.schema';
+
+@Injectable()
+export class PostsService {
+  constructor(
+    @InjectModel(Post.name) private readonly postModel: Model<PostDocument>,
+  ) {}
+
+  findPublishedBySlug(slug: string) {
+    return this.postModel
+      .findOne({ slug, status: 'published' })
+      .populate('author', 'displayName email')
+      .exec();
+  }
+}
+```
+
+`.populate('author', 'displayName email')` follows the `author` `ObjectId` to the `User` collection and swaps it for the matching document, projected down to just `displayName` and `email` — `passwordHash` and `role` never leave the database for this query. (Mongoose's static typings don't automatically flip the TypeScript type of `author` from `Types.ObjectId` to `User` after a `populate` call; later modules narrow the return type explicitly where it matters, e.g. in a GraphQL resolver's return shape.)
+
+`Comment.post` is never populated the same way in the comment-thread query — the thread is fetched by filtering `Comment` directly (`Comment.find({ post: postId, status: 'approved' })`), because the caller already has the post and only needs the comments, not the post data repeated on every comment.
+
+### Why each index exists
+
+Four indexes came out of the schemas in the previous lesson. Each maps to one real query:
+
+| Index | Field(s) | Query it serves |
+|---|---|---|
+| `Post.slug` | `slug` (unique) | `Post.findOne({ slug })` — the public post-detail page, the single most frequent query in the app |
+| `Post.status` | `status` | `Post.find({ status: 'published' })` — the public post list; the admin list queries both values |
+| `Comment.post` | `post` | `Comment.find({ post: postId })` — loading a post's comment thread |
+| `Comment.status` | `status` | `Comment.find({ status: 'pending' })` — the admin moderation queue, across every post |
+
+On `Post.slug`, note that `unique: true` alone already makes Mongoose build a unique index — `index: true` next to it is explicit and documents the intent, but it doesn't create a second index. You still end up with exactly one index on `slug`.
+
+### A compound index for the comment thread
+
+`Comment.status` on its own serves the moderation queue (`status: 'pending'`, no `post` filter). But the far more common comment query filters on **both** fields at once — `{ post: postId, status: 'approved' }`, run on every post page load. MongoDB can answer that with the two single-field indexes by intersecting them, but a compound index answers it directly in one index scan. Mongoose declares compound indexes with `schema.index()` on the schema instance, after `SchemaFactory.createForClass`:
+
+```ts
+// comments/schemas/comment.schema.ts (addition, after the class above)
+export const CommentSchema = SchemaFactory.createForClass(Comment);
+CommentSchema.index({ post: 1, status: 1 });
+```
+
+Field order matters: `{ post: 1, status: 1 }` is efficient for queries that filter on `post` alone or on `post` **and** `status` together (the comment-thread query), but not for a query that filters on `status` alone without `post` — that's exactly why the single-field `status` index from the schema stays in place too, for the moderation queue. The two indexes together, not one replacing the other, cover both query patterns.
+
+## Verify
+
+Once the API is running against the local Mongo container from [Compose skeleton](/devblog/en/setup/compose-skeleton/), Mongoose builds every declared index automatically in a non-production environment. Confirm them directly:
+
+```bash
+docker compose exec mongo mongosh -u devblog -p devblog --authenticationDatabase admin devblog --eval "db.posts.getIndexes()"
+```
+
+```txt
+[
+  { v: 2, key: { _id: 1 }, name: '_id_' },
+  { v: 2, key: { slug: 1 }, name: 'slug_1', unique: true },
+  { v: 2, key: { status: 1 }, name: 'status_1' }
+]
+```
+
+```bash
+docker compose exec mongo mongosh -u devblog -p devblog --authenticationDatabase admin devblog --eval "db.comments.getIndexes()"
+```
+
+```txt
+[
+  { v: 2, key: { _id: 1 }, name: '_id_' },
+  { v: 2, key: { post: 1 }, name: 'post_1' },
+  { v: 2, key: { status: 1 }, name: 'status_1' },
+  { v: 2, key: { post: 1, status: 1 }, name: 'post_1_status_1' }
+]
+```
+
+Seeing `slug_1` marked `unique: true`, and `post_1_status_1` alongside the two single-field indexes on `comments`, confirms both collections are indexed exactly the way this lesson describes.
+
+## Recap
+
+`Post.author` and `Comment.post` are real references, resolved with `.populate()`; `Post.tags` is denormalized data, not a reference, and is never populated. `populate` is Mongoose running a second query for you, with field projection to avoid pulling sensitive fields like `passwordHash` across the wire. Four indexes — `Post.slug` (unique), `Post.status`, `Comment.post`, `Comment.status` — each answer one specific, frequent query, plus a compound `{ post: 1, status: 1 }` index on `Comment` for the comment-thread query that filters on both fields at once. Every index trades write cost for read speed; with `Post` and `Comment` both read far more often than written, that trade pays off here. With the schemas, relationships, and indexes settled, the data model is stable enough to build the API on top of it.
+
+Next: [Backend Foundations →](/devblog/en/backend-foundations/)
