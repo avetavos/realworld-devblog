@@ -1,0 +1,174 @@
+---
+title: The full stack
+description: "Complete infra/docker-compose.yml with mongo, api, and web wired together, depends_on: condition: service_healthy ordering, and an end-to-end acceptance walk from registering an admin through publishing a post and moderating a comment."
+sidebar:
+  order: 3
+---
+
+## What we're building
+
+`infra/docker-compose.yml`, extended from [Compose skeleton](/devblog/en/setup/compose-skeleton/)'s `mongo`-only file to the whole stack: `mongo` (unchanged), `api` (built from [The API image](/devblog/en/docker/api-image/)'s Dockerfile, waiting on Mongo's healthcheck before it starts), and `web` (built from [The web image](/devblog/en/docker/web-image/)'s Dockerfile, wired to both API URLs that lesson introduced). One command, `docker compose up --build`, brings up everything DevBlog needs. The rest of this lesson is a single walk from an empty database to a published post with an approved comment, entirely through the running stack.
+
+## Why
+
+Every piece this lesson assembles already exists on its own. `mongo` has run alone since [Compose skeleton](/devblog/en/setup/compose-skeleton/). `api.Dockerfile` and `web.Dockerfile` both build and run standalone, verified with plain `docker run` in the previous two lessons. What none of those lessons could show is the thing that only exists once all three run *together, on the same network, in the right order*: `api` actually reaching `mongo` by its service name, `web` actually reaching `api` by its service name from server-rendered code, and a browser reaching both `web` and `api` by `localhost` on their published ports — the exact split [The web image](/devblog/en/docker/web-image/)'s `gqlFetch` change exists to handle.
+
+**Startup order matters here in a way a single-container `docker run` never surfaced.** `MongooseModule.forRootAsync` from [Config & exceptions](/devblog/en/backend-foundations/config-exceptions/) calls `configService.getOrThrow('MONGODB_URI')` and connects immediately at boot — if `api`'s container starts before `mongo`'s root user actually exists (the bootstrap [Compose skeleton](/devblog/en/setup/compose-skeleton/) explained runs once, on Mongo's first start with an empty data directory), the very first connection attempt fails with an authentication error, not a "still starting, try again" retry. `depends_on: mongo: condition: service_healthy` is what closes that gap: Compose won't start the `api` container at all until `mongo`'s own `healthcheck` — the same `mongosh --eval` ping from [Compose skeleton](/devblog/en/setup/compose-skeleton/) — reports healthy, not merely "container process started." A bare `depends_on: [mongo]` with no `condition` only waits for the latter, which on a cold `docker compose up` is frequently *before* Mongo has finished creating its root user.
+
+**Why `web`'s `depends_on: api` doesn't ask for the same `condition: service_healthy`.** `web`'s Next.js server itself doesn't fail to start if `api` isn't reachable yet — no Server Component fetches anything at boot, only when a request actually arrives, by which point `api` has almost always caught up. Requiring `api` to be fully healthy before `web` even starts would be the stricter, more defensive choice; this Compose file accepts the small, real gap of "the very first request right after a cold start might hit a `web` container whose `api` dependency is still finishing its own boot" rather than slow down every `docker compose up` waiting on a healthcheck that most of the time doesn't matter by the time a human actually opens a browser.
+
+## Pros & cons
+
+**`depends_on: condition: service_healthy` (what `api`→`mongo` uses) vs. a plain `depends_on` list with no condition.** A conditionless `depends_on: [mongo]` only guarantees Docker starts containers in the right *order* — it says nothing about whether the thing inside `mongo`'s container is actually ready to accept connections yet, which for a database with a first-run bootstrap step is a meaningfully different question from "has the process started." `condition: service_healthy` costs exactly one healthcheck definition (already written, reused from [Compose skeleton](/devblog/en/setup/compose-skeleton/)) and makes Compose poll that healthcheck before letting a dependent container start at all — the right default for any service whose dependent would otherwise fail outright rather than gracefully retry. The cost is a slower `docker compose up` on a cold start, waiting through Mongo's `start_period`, in exchange for `api` never even attempting a connection before it can succeed.
+
+**One `docker-compose.yml` for the whole stack (what we're using) vs. separate Compose files per service, combined with `-f`.** A single file is one thing to read top to bottom to understand the whole system, and `depends_on` can reference every other service directly by name with no cross-file wiring. Splitting `mongo`, `api`, and `web` into their own Compose files (`docker compose -f mongo.yml -f api.yml -f web.yml up`) would let each service's file live closer to the code it builds and be versioned or reused independently — genuinely useful in a larger organization where different teams own different services. For three services that only ever run together, in one repository, the single-file version is simpler to read and there's nothing here that benefits from being independently composable.
+
+## Set it up
+
+Replace `infra/docker-compose.yml` with the full stack:
+
+```yaml
+services:
+  mongo:
+    image: mongo:7
+    environment:
+      MONGO_INITDB_ROOT_USERNAME: devblog
+      MONGO_INITDB_ROOT_PASSWORD: devblog
+    ports:
+      - "27017:27017"
+    volumes:
+      - mongodata:/data/db
+    healthcheck:
+      test: ["CMD", "mongosh", "--eval", "db.adminCommand('ping')"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+
+  api:
+    build:
+      context: ..
+      dockerfile: infra/api.Dockerfile
+    env_file:
+      - ../.env
+    environment:
+      MONGODB_URI: mongodb://devblog:devblog@mongo:27017/devblog?authSource=admin
+    depends_on:
+      mongo:
+        condition: service_healthy
+    ports:
+      - "4000:4000"
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "node",
+          "-e",
+          "require('http').get('http://localhost:4000/health', (r) => process.exit(r.statusCode === 200 ? 0 : 1)).on('error', () => process.exit(1))",
+        ]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+
+  web:
+    build:
+      context: ..
+      dockerfile: infra/web.Dockerfile
+      args:
+        NEXT_PUBLIC_API_URL: http://localhost:4000/graphql
+    environment:
+      API_URL_INTERNAL: http://api:4000/graphql
+    depends_on:
+      - api
+    ports:
+      - "3000:3000"
+
+volumes:
+  mongodata: {}
+```
+
+- **`build.context: ..` for both `api` and `web`**, not `.` — `infra/docker-compose.yml` lives inside `infra/`, but `api.Dockerfile` and `web.Dockerfile` both `COPY apps/api/...` / `COPY apps/web/...` from [The API image](/devblog/en/docker/api-image/) and [The web image](/devblog/en/docker/web-image/), which only resolve against the monorepo root. `dockerfile: infra/api.Dockerfile` is then a path relative to that same context.
+- **`env_file: [../.env]` plus an `environment:` override on `MONGODB_URI`** — `api` loads every other variable (`JWT_SECRET`, `WEB_ORIGIN`, `API_PORT`) straight from the same root `.env` every other module already reads, but `MONGODB_URI` specifically gets overridden to point at `mongo` (the Compose service name) instead of `localhost` — the value in `.env` from [Repo layout](/devblog/en/setup/repo-layout/) is correct for `npm run start:dev` on the host, and wrong for a container on the Compose network, which can't reach the host's `localhost:27017` by that name at all.
+- **The `healthcheck` on `api` calls `node -e` against `http://localhost:4000/health`, not `curl`** — `node:20-slim` has no `curl` or `wget` installed, and adding one purely to satisfy a healthcheck would be an extra package in the runtime image for a job Node's own built-in `http` module already does. `/health` itself is `AppController`'s route from [The app module](/devblog/en/backend-foundations/app-module/), unchanged since that lesson.
+- **`web`'s build `args.NEXT_PUBLIC_API_URL` is `http://localhost:4000/graphql`, matching the port Compose publishes (`4000:4000`) to the host** — this is the address a browser on the developer's machine will actually use, exactly the value [The web image](/devblog/en/docker/web-image/) built into the bundle by hand with `--build-arg`.
+- **`web`'s `environment.API_URL_INTERNAL` is `http://api:4000/graphql`** — `api`, not `localhost`, because this value is read by server-side code running inside the `web` container itself, which reaches the `api` container by its Compose service name over the network Compose creates automatically for every service in this file.
+
+Bring the whole stack up, rebuilding both images:
+
+```bash
+cd devblog/infra
+docker compose up --build
+```
+
+## Verify
+
+```bash
+docker compose ps
+# NAME            IMAGE          STATUS
+# infra-mongo-1   mongo:7        Up (healthy)
+# infra-api-1     infra-api      Up (healthy)
+# infra-web-1     infra-web      Up
+```
+
+`api` reaching `(healthy)` confirms three things happened in order: Mongo passed its own healthcheck, `api` was allowed to start, and `api`'s Mongoose connection to `mongo:27017` (not `localhost`) succeeded — the same handshake [Compose skeleton](/devblog/en/setup/compose-skeleton/) verified for Mongo alone, now proven end to end from inside another container.
+
+### End-to-end acceptance walk
+
+This is the same journey [Frontend tests](/devblog/en/testing/frontend-tests/)'s Playwright sketch named but couldn't run — driven here against the real, containerized stack.
+
+**1. Seed an admin.** Open Apollo Sandbox at `http://localhost:4000/graphql` and register a user, the same `register` mutation from [Auth resolver & GraphQL setup](/devblog/en/auth/auth-resolver/):
+
+```graphql
+mutation Register {
+  register(
+    input: {
+      email: "admin@example.com"
+      password: "correct-horse"
+      displayName: "Site Admin"
+    }
+  ) {
+    token
+  }
+}
+```
+
+Every user this schema can create gets `role: 'author'` by default — [Data modeling](/devblog/en/data-modeling/)'s schema default, and there is no mutation anywhere in this course that promotes one to `'admin'`. That's a real, named gap: a production deployment needs an explicit, auditable way to create its first administrator (a one-time seed script, or a CLI flag on first boot), and DevBlog doesn't build one. For this walk, promote the user by hand, directly against the running Mongo container:
+
+```bash
+docker compose exec mongo mongosh \
+  "mongodb://devblog:devblog@localhost:27017/devblog?authSource=admin" \
+  --eval "db.users.updateOne({ email: 'admin@example.com' }, { \$set: { role: 'admin' } })"
+```
+
+```txt
+{ acknowledged: true, matchedCount: 1, modifiedCount: 1, ... }
+```
+
+**2. Log into `/admin`.** Open `http://localhost:3000/admin/login` and sign in with `admin@example.com` / `correct-horse` — the same `AdminLoginPage` from [Admin auth](/devblog/en/admin/admin-auth/). You should land on the dashboard with the token now carrying `role: "admin"`.
+
+**3. Create and publish a post.** Open `/admin/posts/new`, write a title and some Markdown body, save it (this calls `createPost`, redirecting to the edit page from [Post editor](/devblog/en/admin/post-editor/)), then go to `/admin/posts` and click **Publish**.
+
+**4. See it on the public blog home.** Open `http://localhost:3000` in a new tab. [The home list](/devblog/en/public-blog/home-list/) fetches with `revalidate: 60` and no `revalidateTag` wired to `publishPost` — a real, named gap from that lesson, not new to Docker. If the post you just published isn't there yet, wait up to 60 seconds and reload; it isn't a Docker networking problem, it's Next's own ISR cache window expiring on schedule.
+
+**5. Add a comment.** Open the published post at `/posts/<its-slug>` and submit `CommentForm` as an anonymous visitor. You should see "Thanks — your comment is awaiting moderation." — the same message [Post page](/devblog/en/public-blog/post-page/) built — and the comment itself should **not** appear in the list on this same page yet.
+
+**6. Approve it in `/admin/comments`.** Back in the admin session, open `/admin/comments` — the pending comment should be listed, from [Moderation UI](/devblog/en/admin/moderation-ui/)'s fan-out query. Click **Approve**.
+
+**7. Confirm it appears on the post.** Reload `/posts/<its-slug>`. Because [Post page](/devblog/en/public-blog/post-page/)'s `post(slug)` query — comments included — carries the same `revalidate: 60` window as the home list, the newly approved comment may take up to another 60 seconds to show up here too, for the identical reason step 4 did. Once that window passes, the comment appears in the list, exactly matching [Moderation](/devblog/en/comments/moderation/)'s own Verify section — proven here through the real admin UI and a real container stack instead of directly against the Apollo Sandbox.
+
+### Troubleshooting
+
+**A CORS error in the browser console, mentioning `WEB_ORIGIN` or a blocked origin.** `enableCors({ origin: configService.getOrThrow('WEB_ORIGIN'), ... })` from [The app module](/devblog/en/backend-foundations/app-module/) rejects any origin that isn't an exact match. `WEB_ORIGIN` in `.env` must be `http://localhost:3000` — the origin the *browser* actually sees this app running at — not `http://web:3000` (that's a container-network name with no meaning to a browser) and not `http://localhost:4000` (that's the API's own origin, not the web app's).
+
+**Server Components fail to fetch, but the same page works fine when hit directly with `curl` against port 4000.** This is [The web image](/devblog/en/docker/web-image/)'s two-URL split, inverted by mistake — check that `API_URL_INTERNAL` is set to `http://api:4000/graphql` (the container name) and not accidentally `http://localhost:4000/graphql`. Inside the `web` container, `localhost` refers to the `web` container itself, which isn't listening on port 4000 — nothing is, from its own point of view.
+
+**The browser's own requests fail with a DNS-style error (`ERR_NAME_NOT_RESOLVED` or similar) for a host like `api`.** The opposite mistake: `NEXT_PUBLIC_API_URL` was baked in (or overridden) as `http://api:4000/graphql`. A browser on the host machine has no membership in the Compose network at all and can't resolve `api` as a hostname under any circumstances — only containers on that network can. Rebuild `web` with `--build-arg NEXT_PUBLIC_API_URL=http://localhost:4000/graphql` to fix it; remember from [The web image](/devblog/en/docker/web-image/) that this value is inlined at build time, so a container restart alone won't pick up a corrected one.
+
+**`api` never reaches `(healthy)`, with a Mongo authentication error in its logs.** Almost always a missing or wrong `authSource=admin` on `MONGODB_URI` — [Compose skeleton](/devblog/en/setup/compose-skeleton/) explained why: the root user `MONGO_INITDB_ROOT_USERNAME`/`PASSWORD` creates lives in Mongo's `admin` database, not in `devblog`, the database name earlier in the same connection string. Confirm the override in `docker-compose.yml` still reads `mongodb://devblog:devblog@mongo:27017/devblog?authSource=admin` verbatim.
+
+## Recap
+
+`infra/docker-compose.yml` now runs the whole stack: `mongo` unchanged from [Compose skeleton](/devblog/en/setup/compose-skeleton/), `api` built from [The API image](/devblog/en/docker/api-image/) and gated behind `depends_on: mongo: condition: service_healthy` so it never attempts a connection before Mongo's root user genuinely exists, and `web` built from [The web image](/devblog/en/docker/web-image/) wired to both `NEXT_PUBLIC_API_URL` (the browser's address for `api`) and `API_URL_INTERNAL` (the container network's address for the same service). One `docker compose up --build` is the single command this whole module has been building toward. The acceptance walk proved every layer of this course working together for the first time — registration, a hand-promoted admin (a real, named gap this course leaves open), post authoring and publishing, ISR's real 60-second cache window on both the home list and the post page, anonymous comment submission, and admin moderation — with the Troubleshooting section naming the exact failure each of CORS, the two API URLs, and Mongo's `authSource` produces when misconfigured, rather than leaving them to be discovered by accident. This closes Module 12 — the entire DevBlog stack now runs from a single `docker compose up --build`.
+
+Next: [Wrap-up →](/devblog/en/wrap-up/)

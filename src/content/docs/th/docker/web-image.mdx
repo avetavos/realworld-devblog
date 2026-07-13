@@ -1,0 +1,159 @@
+---
+title: The web image
+description: "เขียน infra/web.Dockerfile สำหรับ standalone output ของ Next.js, เรียนรู้ว่าทำไม NEXT_PUBLIC_API_URL ต้องเป็น build-time ARG แล้วแก้ lib/graphql.ts ให้ server components เรียก API ด้วยชื่อคอนเทนเนอร์แทน localhost"
+sidebar:
+  order: 2
+---
+
+## What we're building
+
+`next.config.ts` เพิ่มมาหนึ่งบรรทัด `output: 'standalone'` `infra/web.Dockerfile` — multi-stage build สำหรับ `apps/web`: สเตจ **builder** ที่ติดตั้ง dependency, รับ `NEXT_PUBLIC_API_URL` เป็น build argument แล้วรัน `next build`; สเตจ **runtime** ที่ copy มาแค่ `.next/standalone`, `.next/static` และ `public` จากมัน พ่วงมากับ Dockerfile คือการแก้ไขเล็ก ๆ แต่สำคัญมากที่ `apps/web/lib/graphql.ts` จาก [GraphQL client & auth](/devblog/th/frontend-foundations/graphql-client/): `gqlFetch` เลือก endpoint ต่างกันขึ้นอยู่กับว่ามันรันอยู่บนเซิร์ฟเวอร์หรือในเบราว์เซอร์
+
+## Why
+
+**`output: 'standalone'` มีอยู่เพราะ Next.js build output แบบ default ไม่ได้ self-contained** `next build` เปล่า ๆ ผลิต `.next/` บวกกับข้อสมมติว่า `node_modules` — *ทั้งหมด* ของ `node_modules` รวมถึงทุก package ที่ `next start` อาจต้องการแบบ transitively — ต้องอยู่ข้าง ๆ มันตอน runtime นั่นโอเคบนเครื่องที่รัน `npm install` ไปแล้ว แต่มันเหมาะกับ Docker image น้อยมาก เพราะทุกเมกะไบต์ใน `node_modules` คือเมกะไบต์ใน layer ทุกตัวที่ตามมาตลอดไป `output: 'standalone'` บอก Next.js ให้ trace runtime dependency graph จริง ๆ — เริ่มจาก code path ของ `next start` เอง ไม่ใช่จาก dependency list เต็มของ `package.json` — แล้ว emit เฉพาะ subset ที่ trace ได้นั้นเข้าไปใน `.next/standalone` พร้อมกับ entry point `server.js` ที่รันแอปได้โดยไม่ต้องมีคำสั่ง `next start` แยกต่างหาก และไม่ต้องมี `node_modules` เต็มเลย
+
+**ทำไมสเตจ runtime ยังต้อง copy `.next/static` กับ `public` เอง** `server.js` ใน `.next/standalone` ตั้งใจให้เรียบง่ายที่สุด — มัน serve หน้าเว็บกับ API route แต่โดยดีไซน์แล้วมันไม่ serve `public/` หรือ `.next/static` เอง โดยตั้งอยู่บนสมมติฐานว่า deployment จริงจะมี CDN อยู่หน้า static asset แทน คอร์สนี้ไม่มี CDN อยู่หน้าอะไรเลย ดังนั้นทั้งสอง folder ต้องถูกวางไว้ข้าง ๆ `server.js` เองแบบตรง ๆ ไม่งั้นทุกรูปใน `public/` และทุก CSS/JS chunk ที่ build แล้วใน `.next/static` จะ 404 ทันทีที่คอนเทนเนอร์เริ่มทำงาน
+
+**ทำไม `NEXT_PUBLIC_API_URL` ต้องเป็น Docker build `ARG` ไม่ใช่ `environment:` ตอน runtime** [GraphQL client & auth](/devblog/th/frontend-foundations/graphql-client/) เคยพูดถึงกลไกนี้ไปแล้ว: Next.js จะ inline ตัวแปรที่มี prefix `NEXT_PUBLIC_` เข้าไปใน JavaScript bundle ที่ compile แล้วตอน build time — แทนที่ `process.env.NEXT_PUBLIC_API_URL` ทุกจุดใน source ด้วย string ที่มันถืออยู่ระหว่าง `next build` แบบเดียวกับที่มันแทนที่ `process.env.NEXT_PUBLIC_ANALYTICS_ID` ในเอกสารของ Next เอง เมื่อการแทนที่นั้นเกิดขึ้นแล้ว ค่านั้นก็ถูกฝังเข้าไปใน chunk `.js` ที่อยู่ใน `.next/static` — การตั้ง `NEXT_PUBLIC_API_URL` เป็นตัวแปร `environment:` ตอน runtime บน *คอนเทนเนอร์* ไม่เปลี่ยนอะไรเลย เพราะไม่มีอะไรใน browser bundle ที่ compile ไปแล้วอ่าน `process.env` ซ้ำตอน runtime ค่านั้นต้องถูกต้อง**ก่อน** `next build` จะรันข้างในสเตจ builder ซึ่งนั่นคือสิ่งที่ Docker build `ARG` (แปลงเป็น `ENV` สำหรับ `RUN npm run build` ตัวเดียวที่ต้องการมัน) ให้มา
+
+**ทำไมเรื่องนี้ถึงต่างไปสำหรับ `API_URL_INTERNAL` ที่แนะนำด้านล่าง** `API_URL_INTERNAL` ตั้งใจไม่มี prefix `NEXT_PUBLIC_` — มันถูกอ่านแค่ในโค้ดฝั่งเซิร์ฟเวอร์เท่านั้น ซึ่งรัน `process.env.API_URL_INTERNAL` ใหม่ทุกครั้งที่มี request เข้ามา โดยอิงกับสิ่งที่ environment จริงของ*คอนเทนเนอร์ที่กำลังรัน*บอกไว้ ไม่ใช่ค่าที่ถูกแช่แข็งไว้ตอน build time นี่คือเหตุผลที่มันอยู่ใน `environment:` list ของ Compose ใน [The full stack](/devblog/th/docker/compose-full/) แทนที่จะเป็น build `ARG` ที่นี่: ตัวแปรที่เซิร์ฟเวอร์อ่านเท่านั้นเปลี่ยนได้ตอน deploy time โดยไม่ต้อง rebuild อะไรเลย ในขณะที่ตัวแปร `NEXT_PUBLIC_` ทำแบบนั้นไม่ได้เลยโดยพื้นฐาน
+
+**การแบ่ง server-vs-browser ที่โมดูลนี้มีอยู่จริง ๆ เพื่อสอน** ข้างใน Compose คอนเทนเนอร์ `web` กับคอนเทนเนอร์ `api` แชร์ network ส่วนตัวที่แต่ละตัวเข้าถึงได้ด้วยชื่อ service ของมัน — `api` resolve ไปที่ address ของคอนเทนเนอร์ API แบบเดียวกับที่ `mongo` เป็นมาตั้งแต่ [Compose skeleton](/devblog/th/setup/compose-skeleton/) *เบราว์เซอร์*บนเครื่องของนักพัฒนาเองไม่ได้เป็นสมาชิกของ network นั้นเลย มันรู้จักแค่ `http://localhost:4000` พอร์ตที่ Compose publish ออกมาให้ host เท่านั้น นั่นคือ address สองแบบที่ต่างกัน ใช้แทนกันไม่ได้ สำหรับ API ตัวเดียวกัน และแบบไหนถูกต้องขึ้นอยู่กับว่า*โค้ดที่กำลังถามอยู่รันที่ไหนจริง ๆ* ไม่ใช่อะไรก็ตามเกี่ยวกับตัว request เอง `gqlFetch` จาก Server Component รันข้างในคอนเทนเนอร์ `web` มันจึงต้องการ `http://api:4000/graphql` `gqlFetch` ตัวเดียวกันเป๊ะ ๆ ที่ถูกเรียกจากโค้ด `'use client'` อย่าง `AdminLoginPage` รันในเบราว์เซอร์ของผู้เข้าชม มันจึงต้องการ `http://localhost:4000/graphql` ฟังก์ชันเดียว ไฟล์เดียว คำตอบที่ถูกต้องสองแบบ ขึ้นอยู่กับ `typeof window`
+
+## Pros & cons
+
+**`output: 'standalone'` เทียบกับการ copy `node_modules` เต็มเข้าไปในสเตจ runtime** การ copy `node_modules` ทั้งหมดเข้าใจง่ายกว่า — ไม่มีอะไรถูก trace ไม่มีอะไรจะถูก trace *ผิด* ได้ อะไรก็ตามที่ `npm ci` ติดตั้งมาคือสิ่งที่ถูกส่งไป ต้นทุนนั้นจริงและใหญ่: `node_modules` เต็มของแอป Next.js มักจะหนักหลายร้อยเมกะไบต์ เกือบทั้งหมดเป็น tooling ที่ใช้แค่ตอน build (`eslint`, `typescript`, `@types/*`) ที่ `next start` ไม่แตะเลยตอน runtime การ trace dependency ของ `output: 'standalone'` แม่นยำพอที่ Vercel จะบันทึกและแนะนำมันโดยเฉพาะสำหรับ Docker deployment แลกกับบรรทัด `next.config` เพิ่มมาหนึ่งบรรทัดและ `COPY` instruction เพิ่มอีกสองตัว (`static`, `public`) ที่ section Set it up ของบทเรียนนี้เดินผ่านให้ทีละขั้น
+
+**build-time `ARG` สำหรับ `NEXT_PUBLIC_API_URL` (แบบที่เราใช้) เทียบกับการยอมรับว่า public API URL เปลี่ยนไม่ได้เลยโดยไม่ rebuild** ไม่มีทางเลือกที่สามที่ทำให้ `NEXT_PUBLIC_API_URL` ทั้ง runtime-configurable *และ* ถูก inline ตามที่ Next.js ต้องการได้พร้อมกัน — trade-off นั้นถูกกำหนดตายตัวโดยวิธีที่ตัวแปร `NEXT_PUBLIC_` ทำงาน ไม่ใช่ทางเลือกที่ Dockerfile นี้ตัดสินใจเอง สิ่งที่**เป็น**ทางเลือกจริงคือการเอ่ยชื่อผลที่ตามมาแทนที่จะซ่อนมันไว้: การชี้ image เดียวกันนี้ไปที่ API origin อื่น (staging environment, domain อื่น) หมายถึง `docker build --build-arg NEXT_PUBLIC_API_URL=...` ใหม่ ไม่ใช่ `docker run -e` ใหม่ pipeline การ production ที่ต้องการ image เดียวที่ promote ข้าม environment โดยไม่เปลี่ยนแปลง จะใช้ same-origin reverse-proxy path แทน (`/api/graphql` ที่ proxy ฝั่งเซิร์ฟเวอร์) เพื่อให้ URL ที่ผู้ใช้เห็นไม่เปลี่ยนเลย — เป็นแพทเทิร์นจริง อยู่นอกขอบเขตของคอร์สนี้ ซึ่ง build image เดียวต่อ Compose stack หนึ่งชุดแทน
+
+## Set it up
+
+อัปเดต `apps/web/next.config.ts`:
+
+```ts
+import type { NextConfig } from 'next';
+
+const nextConfig: NextConfig = {
+  output: 'standalone',
+};
+
+export default nextConfig;
+```
+
+สร้าง `infra/web.Dockerfile`:
+
+```dockerfile
+# ---- builder ----
+FROM node:20-slim AS builder
+WORKDIR /app/apps/web
+
+COPY apps/web/package.json apps/web/package-lock.json ./
+RUN npm ci
+
+COPY apps/web/ ./
+
+# NEXT_PUBLIC_ variables are inlined into the browser bundle at build time —
+# this has to be set before `next build` runs, not at container start.
+ARG NEXT_PUBLIC_API_URL
+ENV NEXT_PUBLIC_API_URL=$NEXT_PUBLIC_API_URL
+
+RUN npm run build
+
+# ---- runtime ----
+FROM node:20-slim AS runtime
+WORKDIR /app/apps/web
+
+COPY --from=builder /app/apps/web/.next/standalone ./
+COPY --from=builder /app/apps/web/.next/static ./.next/static
+COPY --from=builder /app/apps/web/public ./public
+
+ENV PORT=3000
+ENV HOSTNAME=0.0.0.0
+
+EXPOSE 3000
+CMD ["node", "server.js"]
+```
+
+- **`ARG NEXT_PUBLIC_API_URL` แล้วตามด้วย `ENV NEXT_PUBLIC_API_URL=$NEXT_PUBLIC_API_URL`** — `ARG` ของ Dockerfile เพียงลำพังมองเห็นได้แค่จาก instruction `RUN` ในสเตจเดียวกัน ไม่ใช่จาก process Node.js ที่ `next build` spawn ขึ้นมา การประกาศมันใหม่เป็น `ENV` คือสิ่งที่ทำให้ `process.env.NEXT_PUBLIC_API_URL` resolve เป็นอะไรบางอย่างจริง ๆ ข้างในการ build
+- **`ENV PORT=3000` / `HOSTNAME=0.0.0.0`** — `server.js` จาก `output: 'standalone'` อ่านทั้งสองตัวโดยตรง `0.0.0.0` ไม่ใช่ `localhost` หรือ `127.0.0.1` คือสิ่งที่ทำให้เซิร์ฟเวอร์ยอมรับ connection ที่มาจากนอกคอนเทนเนอร์ตัวมันเอง — port mapping ที่ Compose publish ออกมา หรือเบราว์เซอร์ที่เรียก `localhost:3000` บน host ต่างก็มาถึงในฐานะ connection ภายนอกเท่ากันในมุมมองของคอนเทนเนอร์
+- **ไม่มี `node_modules` ถูก copy เลยในสเตจ runtime** — จุดประสงค์ทั้งหมดของ `output: 'standalone'` คือ `.next/standalone` มี subset ที่ trace ไว้แล้วที่มันต้องการอยู่แล้ว ต่างจาก `COPY --from=builder .../node_modules` ที่ชัดเจนของ [The API image](/devblog/th/docker/api-image/)
+
+อัปเดต `apps/web/lib/graphql.ts` — endpoint ที่ `gqlFetch` เรียกจริง ๆ:
+
+```ts
+export const API_URL = process.env.NEXT_PUBLIC_API_URL!;
+
+// Server Components run inside the `web` container and can't reach the API
+// at `localhost` — that resolves to the web container itself. They reach it
+// by container name instead, over the network Compose creates.
+const SERVER_API_URL = process.env.API_URL_INTERNAL ?? API_URL;
+```
+
+แล้วข้างใน `gqlFetch` เอง แทนที่การเรียก `fetch(API_URL, init)` แบบ hardcode:
+
+```ts
+export async function gqlFetch<T>(
+  query: string,
+  variables?: Record<string, unknown>,
+  opts: GqlOptions = {},
+): Promise<T> {
+  // ...headers and init unchanged from GraphQL client & auth...
+
+  const endpoint = typeof window === 'undefined' ? SERVER_API_URL : API_URL;
+  const res = await fetch(endpoint, init);
+  const json = (await res.json()) as GqlResponse<T>;
+
+  // ...error handling unchanged...
+}
+```
+
+- **`typeof window === 'undefined'`** คือเช็คตัวเดียวกับที่ `lib/auth.ts` ของ [GraphQL client & auth](/devblog/th/frontend-foundations/graphql-client/) ใช้ตรวจจับการรันบนเซิร์ฟเวอร์อยู่แล้ว — `window` มีอยู่ในทุกเบราว์เซอร์และไม่มีเลยใน process Node.js ไม่ว่าจะเป็น Server Component หรืออะไรก็ตาม ดังนั้นนี่เป็นสัญญาณที่เชื่อถือได้โดยไม่ต้องมี dependency เพิ่ม
+- **`SERVER_API_URL` fallback ไปที่ `API_URL` เมื่อ `API_URL_INTERNAL` ไม่ได้ตั้งไว้** — นอกเหนือจาก Docker การรัน `apps/web` แบบ local ด้วย `npm run dev` เทียบกับ `apps/api` บน host ทั้งเซิร์ฟเวอร์และเบราว์เซอร์เข้าถึง API แบบเดียวกัน (`http://localhost:4000/graphql`) ดังนั้นการเปลี่ยนนี้ไม่มีผลอะไรเลยจนกว่า [The full stack](/devblog/th/docker/compose-full/) จะตั้งค่า `API_URL_INTERNAL` จริง ๆ
+- **ฝั่ง branch ของเบราว์เซอร์ไม่ถูกแตะเลย** — `AdminLoginPage`, `PostEditor` และ caller `'use client'` อื่น ๆ ทุกตัวจาก [Admin Dashboard](/devblog/th/admin/) ยัง resolve ไปที่ `API_URL` เหมือนเดิมก่อนบทเรียนนี้ทุกประการ
+
+Build image จาก root ของ repo โดยส่ง public API URL เป็น build argument:
+
+```bash
+cd devblog
+docker build -f infra/web.Dockerfile \
+  --build-arg NEXT_PUBLIC_API_URL=http://localhost:4000/graphql \
+  -t devblog-web:latest .
+```
+
+## Verify
+
+```bash
+docker images devblog-web
+# REPOSITORY     TAG       IMAGE ID       CREATED          SIZE
+# devblog-web    latest    ...            ... seconds ago  ~140MB
+```
+
+ยืนยันว่าการ inline ตอน build time เกิดขึ้นจริง — ค้นหา JavaScript ที่ build แล้วหา URL string ตรง ๆ ไม่ใช่ reference `process.env`:
+
+```bash
+docker run --rm devblog-web:latest sh -c "grep -rl 'http://localhost:4000/graphql' .next/static | head -1"
+# ./.next/static/chunks/....js
+```
+
+การเจอ raw string ข้างใน chunk ที่ compile แล้ว (แทนที่จะไม่เจออะไรเลย หรือเจอ `process.env.NEXT_PUBLIC_API_URL` ที่ยังไม่ถูกแทนที่) ยืนยันว่าคู่ `ARG`/`ENV` ไปถึง `next build` จริง ๆ ไม่ใช่แค่ environment ตอน runtime ของคอนเทนเนอร์
+
+`apps/api` ยังไม่ได้รันเป็นคอนเทนเนอร์ ณ จุดนี้ในคอร์ส — [The full stack](/devblog/th/docker/compose-full/) คือที่ที่ `web` มีอะไรให้เรียกจริง ๆ ตอนนี้ ให้ยืนยันแค่ว่าเซิร์ฟเวอร์เองบูตได้สะอาด:
+
+```bash
+docker run --rm -p 3000:3000 devblog-web:latest
+```
+
+```txt
+▲ Next.js ...
+- Local:        http://localhost:3000
+✓ Ready in ...ms
+```
+
+การเปิด `http://localhost:3000` จะ render โครงของหน้า — การดึงข้อมูลกับ API ที่ไม่มีอยู่จริงจะล้มเหลว ซึ่งเป็นเรื่องปกติและโอเคที่นี่ ประเด็นของ section Verify นี้คือการยืนยันว่า `server.js` เริ่มทำงานและ serve `public`/`.next/static` ได้ถูกต้อง ไม่ใช่หน้าที่ทำงานได้สมบูรณ์
+
+## Recap
+
+`output: 'standalone'` ทำให้ Next.js trace runtime dependency graph จริงของตัวเองเข้าไปใน `.next/standalone` แทนที่จะสมมติว่ามี `node_modules` เต็มอยู่ข้าง ๆ — สเตจ runtime ของ `infra/web.Dockerfile` copy output ที่ trace แล้วนั้นบวกกับ `.next/static` และ `public` (ทั้งคู่ตั้งใจไม่รวมอยู่ใน `server.js` โดยสมมติว่า CDN จะ serve มันแทน ซึ่ง stack ของคอร์สนี้ไม่มี) `NEXT_PUBLIC_API_URL` ต้องมาถึงในฐานะ Docker build `ARG` แปลงเป็น `ENV` ก่อน `next build` จะรัน เพราะ Next.js inline ตัวแปรที่มี prefix `NEXT_PUBLIC_` เข้าไปใน browser bundle ตอน build time — entry `environment:` ตอน runtime จะมาถึงช้าเกินไปที่จะเปลี่ยนอะไรที่ compile ไปแล้ว `gqlFetch` ของ `lib/graphql.ts` ตอนนี้เลือกระหว่าง API address ที่ถูกต้องจริงสองแบบ — `API_URL_INTERNAL` (ชื่อ container network) บนเซิร์ฟเวอร์ และ `NEXT_PUBLIC_API_URL` (`localhost`) ในเบราว์เซอร์ — โดยอาศัยแค่ `typeof window` แล้ว fallback กลับไปที่พฤติกรรมเดิมทุกประการที่มันมีนอก Docker
+
+ถัดไป: [The full stack →](/devblog/th/docker/compose-full/)

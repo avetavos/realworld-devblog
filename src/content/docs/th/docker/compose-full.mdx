@@ -1,0 +1,174 @@
+---
+title: The full stack
+description: "infra/docker-compose.yml ฉบับสมบูรณ์ที่ต่อ mongo, api และ web เข้าด้วยกัน การเรียงลำดับด้วย depends_on: condition: service_healthy และการเดินระบบแบบ end-to-end ตั้งแต่ลงทะเบียน admin จนถึง publish โพสต์และ moderate คอมเมนต์"
+sidebar:
+  order: 3
+---
+
+## What we're building
+
+`infra/docker-compose.yml` ต่อยอดจากไฟล์ที่มีแค่ `mongo` ของ [Compose skeleton](/devblog/th/setup/compose-skeleton/) ไปสู่ทั้ง stack: `mongo` (ไม่เปลี่ยน), `api` (build จาก Dockerfile ของ [The API image](/devblog/th/docker/api-image/) รอ healthcheck ของ Mongo ก่อนเริ่ม) และ `web` (build จาก Dockerfile ของ [The web image](/devblog/th/docker/web-image/) ต่อสายเข้ากับ API URL ทั้งสองแบบที่บทเรียนนั้นแนะนำ) คำสั่งเดียว `docker compose up --build` จะยกทุกอย่างที่ DevBlog ต้องการขึ้นมา ที่เหลือของบทเรียนนี้คือการเดินทางเดียวรวดจากฐานข้อมูลเปล่าไปจนถึงโพสต์ที่ publish แล้วพร้อมคอมเมนต์ที่ approve แล้ว ผ่าน stack ที่รันจริงทั้งหมด
+
+## Why
+
+ทุกชิ้นส่วนที่บทเรียนนี้ประกอบเข้าด้วยกันมีอยู่แล้วด้วยตัวมันเอง `mongo` รันเดี่ยวมาตั้งแต่ [Compose skeleton](/devblog/th/setup/compose-skeleton/) `api.Dockerfile` กับ `web.Dockerfile` ทั้งคู่ build และรันแบบ standalone ได้ ยืนยันแล้วด้วย `docker run` เปล่า ๆ ในสองบทเรียนก่อนหน้า สิ่งที่ไม่มีบทเรียนไหนแสดงให้เห็นได้คือสิ่งที่มีอยู่ก็ต่อเมื่อทั้งสามตัวรัน*ร่วมกัน บน network เดียวกัน ตามลำดับที่ถูกต้อง*เท่านั้น: `api` เข้าถึง `mongo` ด้วยชื่อ service จริง ๆ, `web` เข้าถึง `api` ด้วยชื่อ service จริง ๆ จากโค้ดที่ render บนเซิร์ฟเวอร์ และเบราว์เซอร์เข้าถึงทั้ง `web` และ `api` ด้วย `localhost` บน port ที่ publish ออกมา — การแบ่งแบบเป๊ะ ๆ ที่การแก้ไข `gqlFetch` ของ [The web image](/devblog/th/docker/web-image/) มีอยู่เพื่อจัดการ
+
+**ลำดับการเริ่มทำงานสำคัญที่นี่ในแบบที่ `docker run` คอนเทนเนอร์เดียวไม่เคยแสดงให้เห็น** `MongooseModule.forRootAsync` จาก [Config & exceptions](/devblog/th/backend-foundations/config-exceptions/) เรียก `configService.getOrThrow('MONGODB_URI')` แล้วเชื่อมต่อทันทีตอนบูต — ถ้าคอนเทนเนอร์ `api` เริ่มก่อนที่ root user ของ `mongo` จะมีอยู่จริง (bootstrap ที่ [Compose skeleton](/devblog/th/setup/compose-skeleton/) อธิบายไว้ว่ารันแค่ครั้งเดียวตอน Mongo เริ่มครั้งแรกด้วย data directory ที่ว่างเปล่า) ความพยายามเชื่อมต่อครั้งแรกสุดจะล้มเหลวด้วย authentication error ไม่ใช่ retry แบบ "ยังเริ่มอยู่ ลองใหม่" `depends_on: mongo: condition: service_healthy` คือสิ่งที่ปิดช่องว่างนั้น: Compose จะไม่เริ่มคอนเทนเนอร์ `api` เลยจนกว่า `healthcheck` ของ `mongo` เอง — คือ `mongosh --eval` ping ตัวเดียวกับจาก [Compose skeleton](/devblog/th/setup/compose-skeleton/) — จะรายงานว่า healthy ไม่ใช่แค่ "container process เริ่มแล้ว" `depends_on: [mongo]` เปล่า ๆ ที่ไม่มี `condition` จะรอแค่อย่างหลังเท่านั้น ซึ่งใน `docker compose up` แบบเย็น (cold start) มักจะเกิดขึ้น*ก่อน*ที่ Mongo จะสร้าง root user เสร็จ
+
+**ทำไม `depends_on: api` ของ `web` ถึงไม่ขอ `condition: service_healthy` แบบเดียวกัน** เซิร์ฟเวอร์ Next.js ของ `web` เองไม่ล้มเหลวที่จะเริ่มถ้า `api` ยังเข้าถึงไม่ได้ — ไม่มี Server Component ไหนดึงข้อมูลตอนบูตเลย จะดึงก็ต่อเมื่อมี request เข้ามาจริง ๆ ซึ่งตอนนั้น `api` มักจะตามทันแล้วเกือบตลอด การบังคับให้ `api` healthy เต็มที่ก่อนที่ `web` จะเริ่มด้วยซ้ำจะเป็นทางเลือกที่เข้มงวดกว่า ระวังมากกว่า Compose file นี้ยอมรับช่องว่างเล็ก ๆ ที่มีอยู่จริงว่า "request แรกสุดทันทีหลัง cold start อาจไปโดนคอนเทนเนอร์ `web` ที่ dependency `api` ของมันยังบูตไม่เสร็จ" แทนที่จะทำให้ `docker compose up` ทุกครั้งช้าลงเพราะรอ healthcheck ที่ส่วนใหญ่ไม่สำคัญแล้วตอนที่คนจริง ๆ เปิดเบราว์เซอร์
+
+## Pros & cons
+
+**`depends_on: condition: service_healthy` (ที่ `api`→`mongo` ใช้) เทียบกับ `depends_on` แบบ list เปล่า ๆ ไม่มี condition** `depends_on: [mongo]` ที่ไม่มี condition รับประกันแค่ว่า Docker เริ่มคอนเทนเนอร์ตาม*ลำดับ*ที่ถูกต้องเท่านั้น — มันไม่บอกอะไรเลยว่าสิ่งที่อยู่ข้างในคอนเทนเนอร์ `mongo` พร้อมรับ connection แล้วจริงหรือยัง ซึ่งสำหรับฐานข้อมูลที่มีขั้นตอน bootstrap ตอนรันครั้งแรกเป็นคำถามที่ต่างไปอย่างมีนัยสำคัญจาก "process เริ่มแล้วหรือยัง" `condition: service_healthy` มีต้นทุนแค่ healthcheck definition หนึ่งตัว (เขียนไว้แล้ว ใช้ซ้ำจาก [Compose skeleton](/devblog/th/setup/compose-skeleton/)) แล้วทำให้ Compose poll healthcheck นั้นก่อนจะปล่อยให้คอนเทนเนอร์ที่ dependent เริ่มได้เลย — เป็นค่า default ที่ถูกต้องสำหรับ service ไหนก็ตามที่ dependent ของมันจะล้มเหลวตรง ๆ แทนที่จะ retry อย่างสุภาพ ต้นทุนคือ `docker compose up` แบบ cold start ที่ช้าลง รอผ่าน `start_period` ของ Mongo แลกกับที่ `api` ไม่มีวันพยายามเชื่อมต่อเลยก่อนที่มันจะสำเร็จได้
+
+**`docker-compose.yml` ไฟล์เดียวสำหรับทั้ง stack (แบบที่เราใช้) เทียบกับ Compose file แยกต่อ service แล้วรวมกันด้วย `-f`** ไฟล์เดียวคือสิ่งเดียวที่ต้องอ่านตั้งแต่บนลงล่างเพื่อเข้าใจทั้งระบบ และ `depends_on` อ้างถึง service อื่นได้ตรง ๆ ด้วยชื่อโดยไม่ต้องต่อสายข้ามไฟล์ การแยก `mongo`, `api` และ `web` ออกเป็น Compose file ของตัวเอง (`docker compose -f mongo.yml -f api.yml -f web.yml up`) จะให้แต่ละไฟล์ของ service อยู่ใกล้กับโค้ดที่มัน build มากขึ้น และถูก version หรือใช้ซ้ำได้อย่างอิสระ — มีประโยชน์จริงในองค์กรใหญ่ที่ทีมต่างกันเป็นเจ้าของ service ต่างกัน สำหรับสาม service ที่รันร่วมกันเสมอในที่เก็บโค้ดเดียว ไฟล์เดี่ยวอ่านง่ายกว่า และไม่มีอะไรที่นี่ได้ประโยชน์จากการ compose ได้อย่างอิสระเลย
+
+## Set it up
+
+แทนที่ `infra/docker-compose.yml` ด้วยทั้ง stack:
+
+```yaml
+services:
+  mongo:
+    image: mongo:7
+    environment:
+      MONGO_INITDB_ROOT_USERNAME: devblog
+      MONGO_INITDB_ROOT_PASSWORD: devblog
+    ports:
+      - "27017:27017"
+    volumes:
+      - mongodata:/data/db
+    healthcheck:
+      test: ["CMD", "mongosh", "--eval", "db.adminCommand('ping')"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+
+  api:
+    build:
+      context: ..
+      dockerfile: infra/api.Dockerfile
+    env_file:
+      - ../.env
+    environment:
+      MONGODB_URI: mongodb://devblog:devblog@mongo:27017/devblog?authSource=admin
+    depends_on:
+      mongo:
+        condition: service_healthy
+    ports:
+      - "4000:4000"
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "node",
+          "-e",
+          "require('http').get('http://localhost:4000/health', (r) => process.exit(r.statusCode === 200 ? 0 : 1)).on('error', () => process.exit(1))",
+        ]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+
+  web:
+    build:
+      context: ..
+      dockerfile: infra/web.Dockerfile
+      args:
+        NEXT_PUBLIC_API_URL: http://localhost:4000/graphql
+    environment:
+      API_URL_INTERNAL: http://api:4000/graphql
+    depends_on:
+      - api
+    ports:
+      - "3000:3000"
+
+volumes:
+  mongodata: {}
+```
+
+- **`build.context: ..` สำหรับทั้ง `api` และ `web`** ไม่ใช่ `.` — `infra/docker-compose.yml` อยู่ข้างใน `infra/` แต่ `api.Dockerfile` กับ `web.Dockerfile` ทั้งคู่ `COPY apps/api/...` / `COPY apps/web/...` จาก [The API image](/devblog/th/docker/api-image/) และ [The web image](/devblog/th/docker/web-image/) ซึ่ง resolve ได้ก็ต่อเมื่อเทียบกับ root ของ monorepo เท่านั้น `dockerfile: infra/api.Dockerfile` จึงเป็น path ที่สัมพันธ์กับ context เดียวกันนั้น
+- **`env_file: [../.env]` บวกกับ `environment:` override บน `MONGODB_URI`** — `api` โหลดตัวแปรอื่นทุกตัว (`JWT_SECRET`, `WEB_ORIGIN`, `API_PORT`) ตรงจาก `.env` ที่ root ตัวเดียวกับที่ทุกโมดูลอ่านอยู่แล้ว แต่ `MONGODB_URI` โดยเฉพาะถูก override ให้ชี้ไปที่ `mongo` (ชื่อ service ของ Compose) แทนที่ `localhost` — ค่าใน `.env` จาก [Repo layout](/devblog/th/setup/repo-layout/) ถูกต้องสำหรับ `npm run start:dev` บน host และผิดสำหรับคอนเทนเนอร์บน Compose network ซึ่งเข้าถึง `localhost:27017` ของ host ด้วยชื่อนั้นไม่ได้เลย
+- **`healthcheck` บน `api` เรียก `node -e` ไปที่ `http://localhost:4000/health` ไม่ใช่ `curl`** — `node:20-slim` ไม่มี `curl` หรือ `wget` ติดตั้งอยู่ และการเพิ่มมันเข้ามาแค่เพื่อให้ healthcheck ผ่านจะเป็น package เพิ่มใน runtime image สำหรับงานที่ module `http` ในตัวของ Node ทำให้ได้อยู่แล้ว `/health` เองคือ route ของ `AppController` จาก [The app module](/devblog/th/backend-foundations/app-module/) ไม่เปลี่ยนแปลงตั้งแต่บทเรียนนั้น
+- **`args.NEXT_PUBLIC_API_URL` ของ `web` คือ `http://localhost:4000/graphql` ตรงกับ port ที่ Compose publish (`4000:4000`) ให้ host** — นี่คือ address ที่เบราว์เซอร์บนเครื่องนักพัฒนาจะใช้จริง ๆ ค่าเดียวเป๊ะกับที่ [The web image](/devblog/th/docker/web-image/) ฝังเข้าไปใน bundle ด้วยมือผ่าน `--build-arg`
+- **`environment.API_URL_INTERNAL` ของ `web` คือ `http://api:4000/graphql`** — `api` ไม่ใช่ `localhost` เพราะค่านี้ถูกอ่านโดยโค้ดฝั่งเซิร์ฟเวอร์ที่รันข้างในคอนเทนเนอร์ `web` เอง ซึ่งเข้าถึงคอนเทนเนอร์ `api` ด้วยชื่อ service ของ Compose ผ่าน network ที่ Compose สร้างให้อัตโนมัติสำหรับทุก service ในไฟล์นี้
+
+ยกทั้ง stack ขึ้นมา rebuild ทั้งสอง image:
+
+```bash
+cd devblog/infra
+docker compose up --build
+```
+
+## Verify
+
+```bash
+docker compose ps
+# NAME            IMAGE          STATUS
+# infra-mongo-1   mongo:7        Up (healthy)
+# infra-api-1     infra-api      Up (healthy)
+# infra-web-1     infra-web      Up
+```
+
+`api` ที่ไปถึง `(healthy)` ยืนยันว่าสามอย่างเกิดขึ้นตามลำดับ: Mongo ผ่าน healthcheck ของตัวเอง, `api` ได้รับอนุญาตให้เริ่ม และการเชื่อมต่อ Mongoose ของ `api` ไปที่ `mongo:27017` (ไม่ใช่ `localhost`) สำเร็จ — handshake เดียวกันกับที่ [Compose skeleton](/devblog/th/setup/compose-skeleton/) ยืนยันสำหรับ Mongo เดี่ยว ๆ ตอนนี้พิสูจน์แล้วแบบ end-to-end จากข้างในคอนเทนเนอร์อีกตัวหนึ่ง
+
+### End-to-end acceptance walk
+
+นี่คือการเดินทางเดียวกับที่ Playwright sketch ของ [Frontend tests](/devblog/th/testing/frontend-tests/) เอ่ยชื่อไว้แต่รันไม่ได้ — ขับเคลื่อนที่นี่ต่อ stack ที่ containerize จริง
+
+**1. Seed admin หนึ่งคน** เปิด Apollo Sandbox ที่ `http://localhost:4000/graphql` แล้วลงทะเบียนผู้ใช้ ด้วย mutation `register` ตัวเดียวกันจาก [Auth resolver & GraphQL setup](/devblog/th/auth/auth-resolver/):
+
+```graphql
+mutation Register {
+  register(
+    input: {
+      email: "admin@example.com"
+      password: "correct-horse"
+      displayName: "Site Admin"
+    }
+  ) {
+    token
+  }
+}
+```
+
+ผู้ใช้ทุกคนที่ schema นี้สร้างได้จะได้ `role: 'author'` เป็น default — ค่า default ของ schema จาก [Data modeling](/devblog/th/data-modeling/) และไม่มี mutation ไหนเลยในคอร์สนี้ที่ promote ผู้ใช้ไปเป็น `'admin'` นั่นคือช่องว่างจริงที่ต้องเอ่ยชื่อไว้ตรง ๆ: deployment จริงต้องการวิธีที่ชัดเจนและตรวจสอบได้ในการสร้าง administrator คนแรก (seed script แบบครั้งเดียว หรือ flag ของ CLI ตอนบูตครั้งแรก) และ DevBlog ไม่ได้สร้างมันขึ้นมา สำหรับการเดินระบบนี้ ให้ promote ผู้ใช้ด้วยมือ ตรงเข้าไปที่คอนเทนเนอร์ Mongo ที่กำลังรันอยู่:
+
+```bash
+docker compose exec mongo mongosh \
+  "mongodb://devblog:devblog@localhost:27017/devblog?authSource=admin" \
+  --eval "db.users.updateOne({ email: 'admin@example.com' }, { \$set: { role: 'admin' } })"
+```
+
+```txt
+{ acknowledged: true, matchedCount: 1, modifiedCount: 1, ... }
+```
+
+**2. Log in เข้า `/admin`** เปิด `http://localhost:3000/admin/login` แล้ว sign in ด้วย `admin@example.com` / `correct-horse` — `AdminLoginPage` ตัวเดียวกันจาก [Admin auth](/devblog/th/admin/admin-auth/) คุณควรลงเอยที่ dashboard พร้อม token ที่ตอนนี้มี `role: "admin"` แล้ว
+
+**3. สร้างและ publish โพสต์** เปิด `/admin/posts/new` เขียน title กับ body เป็น Markdown แล้ว save (นี่จะเรียก `createPost` แล้ว redirect ไปหน้า edit จาก [Post editor](/devblog/th/admin/post-editor/)) แล้วไปที่ `/admin/posts` แล้วคลิก **Publish**
+
+**4. ดูมันบนหน้าแรกของบล็อกสาธารณะ** เปิด `http://localhost:3000` ในแท็บใหม่ [The home list](/devblog/th/public-blog/home-list/) ดึงข้อมูลด้วย `revalidate: 60` และไม่มี `revalidateTag` ต่อสายไว้กับ `publishPost` — ช่องว่างจริงที่เอ่ยชื่อไว้แล้วจากบทเรียนนั้น ไม่ใช่เรื่องใหม่ของ Docker ถ้าโพสต์ที่คุณเพิ่ง publish ไปยังไม่ปรากฏ ให้รอไม่เกิน 60 วินาทีแล้ว reload ใหม่ — มันไม่ใช่ปัญหา networking ของ Docker แต่เป็น cache window ของ ISR ของ Next เองที่หมดอายุตามกำหนดเวลา
+
+**5. เพิ่มคอมเมนต์** เปิดโพสต์ที่ publish แล้วที่ `/posts/<slug ของมัน>` แล้ว submit `CommentForm` ในฐานะผู้เข้าชมที่ไม่ระบุตัวตน คุณควรเห็น "Thanks — your comment is awaiting moderation." — ข้อความเดียวกับที่ [Post page](/devblog/th/public-blog/post-page/) สร้างไว้ — และคอมเมนต์เองไม่ควรปรากฏในรายการบนหน้าเดียวกันนี้เลย
+
+**6. Approve มันใน `/admin/comments`** กลับไปที่ session admin เปิด `/admin/comments` — คอมเมนต์ที่ pending ควรอยู่ในรายการ จาก query แบบ fan-out ของ [Moderation UI](/devblog/th/admin/moderation-ui/) คลิก **Approve**
+
+**7. ยืนยันว่ามันปรากฏบนโพสต์** Reload `/posts/<slug ของมัน>` เพราะ query `post(slug)` ของ [Post page](/devblog/th/public-blog/post-page/) — รวมคอมเมนต์ด้วย — มี `revalidate: 60` window เดียวกันกับ home list คอมเมนต์ที่เพิ่ง approve อาจใช้เวลาอีกไม่เกิน 60 วินาทีถึงจะปรากฏที่นี่เช่นกัน ด้วยเหตุผลเดียวกับขั้นตอนที่ 4 เป๊ะ ๆ เมื่อ window นั้นผ่านไปแล้ว คอมเมนต์จะปรากฏในรายการ ตรงกับ section Verify ของ [Moderation](/devblog/th/comments/moderation/) เองเป๊ะ — พิสูจน์แล้วที่นี่ผ่าน admin UI จริงและ container stack จริง แทนที่จะเป็นการเรียกตรงกับ Apollo Sandbox
+
+### Troubleshooting
+
+**CORS error ใน console ของเบราว์เซอร์ ที่เอ่ยถึง `WEB_ORIGIN` หรือ origin ที่ถูกบล็อก** `enableCors({ origin: configService.getOrThrow('WEB_ORIGIN'), ... })` จาก [The app module](/devblog/th/backend-foundations/app-module/) ปฏิเสธ origin ไหนก็ตามที่ไม่ตรงกันเป๊ะ `WEB_ORIGIN` ใน `.env` ต้องเป็น `http://localhost:3000` — origin ที่*เบราว์เซอร์*เห็นจริง ๆ ว่าแอปนี้รันอยู่ — ไม่ใช่ `http://web:3000` (นั่นคือชื่อ container network ที่ไม่มีความหมายอะไรกับเบราว์เซอร์) และไม่ใช่ `http://localhost:4000` (นั่นคือ origin ของ API เอง ไม่ใช่ของ web app)
+
+**Server Components ดึงข้อมูลไม่สำเร็จ แต่หน้าเดียวกันทำงานได้ดีเวลา `curl` ตรงเข้าไปที่ port 4000** นี่คือการแบ่ง URL สองตัวของ [The web image](/devblog/th/docker/web-image/) ที่กลับด้านโดยไม่ตั้งใจ — ตรวจสอบว่า `API_URL_INTERNAL` ตั้งไว้เป็น `http://api:4000/graphql` (ชื่อคอนเทนเนอร์) ไม่ใช่ `http://localhost:4000/graphql` โดยไม่ตั้งใจ ข้างในคอนเทนเนอร์ `web` นั้น `localhost` หมายถึงคอนเทนเนอร์ `web` เอง ซึ่งไม่มีอะไร listen อยู่ที่ port 4000 เลย ในมุมมองของตัวมันเอง
+
+**Request ของเบราว์เซอร์เองล้มเหลวด้วย error แบบ DNS (`ERR_NAME_NOT_RESOLVED` หรือคล้ายกัน) สำหรับ host อย่าง `api`** ความผิดพลาดตรงข้าม: `NEXT_PUBLIC_API_URL` ถูกฝัง (หรือ override) เป็น `http://api:4000/graphql` เบราว์เซอร์บนเครื่อง host ไม่ได้เป็นสมาชิกของ Compose network เลย และ resolve `api` เป็น hostname ไม่ได้ไม่ว่ากรณีไหนเลย — มีแค่คอนเทนเนอร์บน network นั้นเท่านั้นที่ทำได้ Rebuild `web` ด้วย `--build-arg NEXT_PUBLIC_API_URL=http://localhost:4000/graphql` เพื่อแก้มัน — จำไว้จาก [The web image](/devblog/th/docker/web-image/) ว่าค่านี้ถูก inline ตอน build time ดังนั้นแค่ restart คอนเทนเนอร์อย่างเดียวจะไม่หยิบค่าที่แก้แล้วมาใช้
+
+**`api` ไม่ถึง `(healthy)` เลย พร้อม Mongo authentication error ใน log** แทบทุกครั้งเกิดจาก `authSource=admin` ที่หายไปหรือผิดใน `MONGODB_URI` — [Compose skeleton](/devblog/th/setup/compose-skeleton/) อธิบายไว้แล้วว่าทำไม: root user ที่ `MONGO_INITDB_ROOT_USERNAME`/`PASSWORD` สร้างขึ้นอยู่ใน database `admin` ของ Mongo ไม่ใช่ใน `devblog` ซึ่งเป็นชื่อ database ก่อนหน้ามันใน connection string เดียวกัน ตรวจสอบว่า override ใน `docker-compose.yml` ยังอ่าน `mongodb://devblog:devblog@mongo:27017/devblog?authSource=admin` ตรงตัวอยู่
+
+## Recap
+
+`infra/docker-compose.yml` ตอนนี้รันทั้ง stack: `mongo` ไม่เปลี่ยนจาก [Compose skeleton](/devblog/th/setup/compose-skeleton/), `api` build จาก [The API image](/devblog/th/docker/api-image/) และถูกกั้นไว้หลัง `depends_on: mongo: condition: service_healthy` เพื่อไม่ให้มันพยายามเชื่อมต่อเลยก่อนที่ root user ของ Mongo จะมีอยู่จริง และ `web` build จาก [The web image](/devblog/th/docker/web-image/) ต่อสายเข้ากับทั้ง `NEXT_PUBLIC_API_URL` (address ของ `api` สำหรับเบราว์เซอร์) และ `API_URL_INTERNAL` (address ของ service เดียวกันสำหรับ container network) `docker compose up --build` คำสั่งเดียวคือสิ่งที่ทั้งโมดูลนี้กำลังมุ่งไปหา การเดินระบบแบบ acceptance พิสูจน์ว่าทุกชั้นของคอร์สนี้ทำงานร่วมกันเป็นครั้งแรก — การลงทะเบียน, admin ที่ promote ด้วยมือ (ช่องว่างจริงที่คอร์สนี้เปิดทิ้งไว้), การเขียนและ publish โพสต์, cache window 60 วินาทีจริงของ ISR ทั้งบน home list และหน้าโพสต์, การ submit คอมเมนต์แบบไม่ระบุตัวตน และการ moderate โดย admin — พร้อมกับ section Troubleshooting ที่เอ่ยชื่อความล้มเหลวที่แน่นอนของแต่ละอย่าง ทั้ง CORS, API URL สองตัว และ `authSource` ของ Mongo เมื่อตั้งค่าผิด แทนที่จะปล่อยให้ถูกค้นพบโดยบังเอิญ นี่คือการปิด Module 12 — ทั้ง DevBlog stack รันได้จาก `docker compose up --build` คำสั่งเดียวแล้ว
+
+ถัดไป: [Wrap-up →](/devblog/th/wrap-up/)

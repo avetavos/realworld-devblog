@@ -1,0 +1,116 @@
+---
+title: The API image
+description: "เขียน infra/api.Dockerfile — multi-stage build สองสเตจที่ compile apps/api ด้วย Nest CLI, prune dev dependencies ออก แล้วส่งเฉพาะ dist/ กับ production node_modules เข้าไปใน runtime image"
+sidebar:
+  order: 1
+---
+
+## What we're building
+
+`infra/api.Dockerfile` — multi-stage build สำหรับ `apps/api` สเตจ **builder** ติดตั้งทุก dependency, รัน `nest build`, แล้ว prune dev dependencies ออกจาก `node_modules` ของตัวเอง สเตจ **runtime** เริ่มใหม่จาก `node:20-slim` ตัวสด ๆ แล้ว copy เข้ามาเฉพาะ `node_modules` ที่ prune แล้วกับ `dist/` ที่ compile เสร็จแล้ว — ไม่มีอะไรที่แตะ TypeScript, ESLint หรือ Jest เลยที่จะไปโผล่ใน image ที่รันจริงในโปรดักชัน พ่วงมาด้วย `.dockerignore` ที่ root ของ repo ที่กันไม่ให้ `node_modules`, build output และ secrets หลุดเข้าไปใน build context ซึ่ง Dockerfile นี้กับ [The web image](/devblog/th/docker/web-image/) จะใช้ร่วมกัน
+
+## Why
+
+ทุกโมดูลก่อนหน้ารัน `apps/api` ด้วย `npm run start:dev` จาก [Backend init](/devblog/th/setup/backend-init/) เป็นต้นมา — เป็น process บน host ที่อ่าน `.env` โดยตรง แล้ว restart ตัวเองทุกครั้งที่ save นี่คือเครื่องมือที่ถูกต้องสำหรับการเขียนโค้ด แต่มันคือเครื่องมือที่ผิดสำหรับการส่งมอบ API ตัวนี้ให้กับอะไรก็ตามที่ไม่ใช่ laptop ของนักพัฒนาเอง — เพื่อนร่วมทีม, CI runner หรือ deployment target จริงต้องการ artifact ตัวเดียวที่รันเหมือนกันทุกที่ โดยไม่ต้อง clone repo แล้ว `npm install` ก่อน Docker image คือ artifact นั้น
+
+การ build ทำสองสเตจเพราะ NestJS app ที่ compile แล้วแทบไม่ต้องการอะไรเลยจากสิ่งที่ใช้ผลิตมันขึ้นมา `nest build` ต้องการ TypeScript compiler, `@nestjs/cli` และทุก package `@types/*` จากการติดตั้ง dependency ของ [Backend init](/devblog/th/setup/backend-init/) `node dist/main.js` ไม่ต้องการสิ่งเหล่านั้นเลยสักอย่าง — มันต้องการแค่ `@nestjs/core`, `mongoose`, `passport-jwt` และ runtime dependency ที่เหลือ บวกกับ JavaScript ธรรมดาที่ `nest build` emit เข้าไปใน `dist/` อยู่แล้ว สเตจ builder คือที่ที่ list แรกรัน; สเตจ runtime เห็นแค่ list ที่สองเท่านั้น `RUN npm prune --omit=dev` ท้ายสเตจ builder คือสิ่งที่ทำให้การแบ่งนี้เป็นจริง ไม่ใช่แค่ผิวเผิน — ถ้าไม่มีมัน `node_modules` ยังมี dev dependency ทุกตัวอยู่ในนั้นหลัง build เสร็จ แล้วการ copy มันต่อไปจะพา TypeScript compiler เข้าไปใน image ที่งานเดียวของมันคือรัน JavaScript ที่ compile แล้ว
+
+`.dockerignore` ที่ root มีเหตุผลอีกแบบ: `docker build` จะส่ง build context ทั้งหมด — ทุกไฟล์ใน directory ที่ `docker build` ชี้ไป — ไปให้ Docker daemon ก่อนที่ instruction แรกจะรันด้วยซ้ำ ถ้าไม่มี `.dockerignore` context นั้นจะรวม `node_modules` หรือ `dist` ที่มีอยู่แล้วบนเครื่องที่ build image ซึ่งอาจเป็นกิกะไบต์ ไม่เกี่ยวข้องเลย (มันจะถูกติดตั้งใหม่และ compile ใหม่ข้างในคอนเทนเนอร์อยู่ดี) และในกรณีของ `node_modules` มันยังผูกกับแพลตฟอร์มด้วย — native module ที่ build มาสำหรับ macOS laptop ของนักพัฒนาไม่ใช่สิ่งที่ควรไปฝังอยู่ใน image `node:20-slim` บน Linux ผ่าน `COPY` ที่หลงเข้ามา
+
+## Pros & cons
+
+**สเตจ builder เดี่ยวที่ prune แล้ว (แบบที่เราใช้) เทียบกับสเตจ `deps` แยกต่างหากตัวที่สาม** Dockerfile Node แบบ multi-stage บางไฟล์เพิ่มสเตจแยกที่ไม่ทำอะไรเลยนอกจากรัน `npm ci --omit=dev` กับ `package.json` เปล่า ๆ เพื่อผลิต production `node_modules` ที่สะอาด ไม่มีขั้นตอน prune และไม่มีความเสี่ยงที่อะไรจากสเตจ build จะรั่วผ่านไป สเตจที่สามนั้นมีต้นทุนคือบรรทัด `FROM` เพิ่มอีกหนึ่งบรรทัดกับการติดตั้ง dependency เพิ่มอีกครั้งใน build (npm ci ตัวที่สอง คราวนี้ production-only เท่านั้น) — คุ้มค่าจริง ๆ ในทีมใหญ่ที่ "prune เอาทุกอย่างที่ควรเอาออกไปจริงหรือเปล่า" เป็นคำถาม audit ที่จริงจัง สำหรับ build สองสเตจของ `apps/api` ที่นี่ `npm prune --omit=dev` ที่อ่าน `package.json` ตัวเดียวกับที่ `npm ci` ใช้ติดตั้งไปแล้วนั้นแม่นยำพอ — งานทั้งหมดของ prune คือการกระทบยอด package ที่ติดตั้งกับ `dependencies`/`devDependencies` ใน `package.json` ซึ่งเป็นคำถามเป๊ะ ๆ ที่ Dockerfile นี้ต้องการคำตอบ
+
+**`node:20-slim` เทียบกับ `node:20-alpine`** รุ่น `alpine` เล็กกว่าอีก — C library `musl` ของ Alpine และ userland แบบ BusyBox ตัดพื้นที่จริง ๆ ออกไปได้ทั้งสองสเตจ — แลกกับที่ `musl` บางครั้งทำงานต่างไปจาก `glibc` เล็กน้อยแบบแนบเนียน ซึ่ง native binding ของ `bcrypt` (ติดตั้งไปแล้วใน [Backend init](/devblog/th/setup/backend-init/)) มักถูก build และทดสอบด้วย `glibc` เป็นหลัก อาจหมายความว่า native module ที่ติดตั้งได้เนียน ๆ บน `slim` build ไม่ผ่านบน `alpine` ถ้าไม่มี toolchain package เพิ่ม `slim` — ที่มีฐานเป็น Debian, ใช้ `glibc`, ไม่มี shell utility หรือ package manager เกินกว่าที่ Debian base เปล่า ๆ มีให้ — เป็นค่า default ที่ปลอดภัยกว่าสำหรับแอปที่มี native dependency อยู่ใน stack แล้ว การประหยัดเพิ่มของ `alpine` เป็นตัวเลือกจริงที่ควรพิจารณาใหม่ถ้าขนาดของ image นี้กลายเป็นปัญหาจริงในการทำงาน ไม่ใช่ค่า default ที่ควรเลือกโดยอัตโนมัติ
+
+## Set it up
+
+สร้าง `.dockerignore` ที่ root ของ repo (`devblog/.dockerignore`):
+
+```txt
+**/node_modules
+**/dist
+**/.next
+**/coverage
+.git
+.env
+.env.local
+**/*.log
+.DS_Store
+```
+
+ไฟล์นี้ใช้ร่วมกันโดย Dockerfile ทั้งสองไฟล์ในโมดูลนี้ — build ของ [The web image](/devblog/th/docker/web-image/) ก็อ่านไฟล์เดียวกันนี้ ซึ่งเป็นเหตุผลที่มันกัน `.next` กับ `node_modules` แบบทั่วไป (`**/`) แทนที่จะระบุ `apps/api/node_modules` กับ `apps/web/node_modules` แยกกัน
+
+สร้าง `infra/api.Dockerfile`:
+
+```dockerfile
+# ---- builder ----
+FROM node:20-slim AS builder
+WORKDIR /app/apps/api
+
+COPY apps/api/package.json apps/api/package-lock.json ./
+RUN npm ci
+
+COPY apps/api/ ./
+RUN npm run build
+
+# Reconcile node_modules against package.json's dependencies/devDependencies
+# split now that the TypeScript build is done — nothing dev-only should
+# make it into the runtime stage below.
+RUN npm prune --omit=dev
+
+# ---- runtime ----
+FROM node:20-slim AS runtime
+WORKDIR /app/apps/api
+
+COPY --from=builder /app/apps/api/node_modules ./node_modules
+COPY --from=builder /app/apps/api/dist ./dist
+
+EXPOSE 4000
+CMD ["node", "dist/main.js"]
+```
+
+- **`WORKDIR /app/apps/api` ในทั้งสองสเตจ** ทำให้ path ในคอนเทนเนอร์มีรูปร่างเหมือน path ของ monorepo ที่มันมาจาก — path ไฟล์ใน stack trace ยังจำได้ แทนที่จะยุบทุกอย่างลงเหลือแค่ `/app` เปล่า ๆ
+- **`COPY apps/api/package.json apps/api/package-lock.json ./` ก่อน `COPY apps/api/ ./`** เป็นการเล่นกับ layer caching ของ Docker — ตราบใดที่ไฟล์ทั้งสองไม่เปลี่ยน `docker build` จะใช้ layer `npm ci` ที่ cache ไว้ซ้ำในทุกการ rebuild ที่แตะแค่ไฟล์ source แทนที่จะติดตั้ง dependency ใหม่ทั้งหมดทุกครั้ง
+- **build context คือ root ของ repo ไม่ใช่ `infra/`** ทั้งสอง instruction `COPY` ข้างบนอ่าน `apps/api/...` ซึ่งจะ resolve ได้ก็ต่อเมื่อ `docker build` ชี้ไปที่ `devblog/` เอง — ดูคำสั่งด้านล่าง
+- **ไม่มีอะไรที่นี่อ่าน `.env`** `MONGODB_URI`, `JWT_SECRET` และที่เหลือถูกส่งเข้ามาตอน *container run time* ผ่าน `docker run -e` หรือใน [The full stack](/devblog/th/docker/compose-full/) ผ่าน `env_file`/`environment` ของ Compose — ไม่เคยฝังเข้าไปใน image เลย image ที่ hardcode secret ตอน build time จะรั่ว secret นั้นให้ใครก็ตามที่ตรวจสอบ layer ของมันได้ และจะต้อง rebuild ใหม่ทั้งหมดทุกครั้งที่ credential หมุนเวียน
+
+Build image จาก root ของ repo:
+
+```bash
+cd devblog
+docker build -f infra/api.Dockerfile -t devblog-api:latest .
+```
+
+## Verify
+
+```bash
+docker images devblog-api
+# REPOSITORY    TAG       IMAGE ID       CREATED          SIZE
+# devblog-api   latest    ...            ... seconds ago  ~180MB
+```
+
+รันมันแบบ standalone ชี้ไปที่ MongoDB ที่มีอยู่แล้วที่คุณเข้าถึงได้ (ตัวจาก [Compose skeleton](/devblog/th/setup/compose-skeleton/) ถ้ายังรันอยู่):
+
+```bash
+docker run --rm -p 4000:4000 \
+  -e MONGODB_URI="mongodb://devblog:devblog@host.docker.internal:27017/devblog?authSource=admin" \
+  -e JWT_SECRET="change-me-in-prod" \
+  -e WEB_ORIGIN="http://localhost:3000" \
+  devblog-api:latest
+```
+
+`host.docker.internal` resolve ไปที่เครื่อง host จากข้างในคอนเทนเนอร์บน Docker Desktop — มันคือ escape hatch ที่ `docker run` แบบ standalone นี้ต้องการ เพราะยังไม่มี Compose network ให้เข้าถึง `mongo` ผ่านชื่อคอนเทนเนอร์ [The full stack](/devblog/th/docker/compose-full/) จะแทนที่มันด้วยชื่อ service จริงเมื่อทุกอย่างรันร่วมกัน
+
+```bash
+curl localhost:4000/health
+# {"status":"ok"}
+```
+
+`{"status":"ok"}` ตัวเดียวกับที่ [The app module](/devblog/th/backend-foundations/app-module/) เคยคืนมาครั้งแรกจาก `npm run start:dev` — ตอนนี้มาจากคอนเทนเนอร์ที่รันแค่ `node` กับ compiled output เท่านั้น ไม่มี TypeScript compiler ไม่มีไฟล์ source `.ts` และไม่มี dev dependency อยู่ข้างในเลย
+
+## Recap
+
+`infra/api.Dockerfile` เป็น build สองสเตจ: สเตจ `builder` ที่รัน `npm ci`, `nest build` และ `npm prune --omit=dev` กับ dependency ชุดเต็ม และสเตจ `runtime` ที่เริ่มสะอาดจาก `node:20-slim` แล้ว copy ต่อไปเฉพาะ `node_modules` ที่ prune แล้วกับ `dist/` ที่ compile แล้ว `.dockerignore` ที่ root ของ repo กัน build context ให้ปลอดจาก `node_modules`, build artifact และ secret ใน `.env` `node:20-slim` แทน `node:20-alpine` คือทางเลือกที่ตั้งใจเพราะ native binding ของ `bcrypt` จาก [Backend init](/devblog/th/setup/backend-init/) ไม่มี secret ไหนถูกฝังเข้าไปใน image เลย — `MONGODB_URI`, `JWT_SECRET` และ `WEB_ORIGIN` ทั้งหมดถูกส่งเข้ามาตอน container run time
+
+ถัดไป: [The web image →](/devblog/th/docker/web-image/)

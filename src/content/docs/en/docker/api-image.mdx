@@ -1,0 +1,116 @@
+---
+title: The API image
+description: "Write infra/api.Dockerfile — a two-stage build that compiles apps/api with the Nest CLI, prunes dev dependencies, and ships only dist/ and production node_modules in the runtime image."
+sidebar:
+  order: 1
+---
+
+## What we're building
+
+`infra/api.Dockerfile` — a multi-stage build for `apps/api`. The **builder** stage installs every dependency, runs `nest build`, then prunes dev dependencies out of its own `node_modules`. The **runtime** stage starts from a fresh `node:20-slim` and copies in only the pruned `node_modules` and the compiled `dist/` — nothing that touched TypeScript, ESLint, or Jest ever reaches the image that actually runs in production. Alongside it, a repo-root `.dockerignore` that keeps `node_modules`, build output, and secrets out of the build context both this Dockerfile and [The web image](/devblog/en/docker/web-image/)'s will share.
+
+## Why
+
+Every earlier module ran `apps/api` with `npm run start:dev` from [Backend init](/devblog/en/setup/backend-init/) onward — a process on the host, reading `.env` directly, restarting itself on save. That's the right tool for writing code. It is the wrong tool for handing this API to anything that isn't a developer's own laptop: a teammate, a CI runner, or a real deployment target needs one artifact that runs the same way everywhere, without first cloning the repo and running `npm install`. A Docker image is that artifact.
+
+The build happens in two stages because a compiled NestJS app needs almost none of what it takes to produce one. `nest build` needs the TypeScript compiler, `@nestjs/cli`, and every `@types/*` package from [Backend init](/devblog/en/setup/backend-init/)'s dependency install. `node dist/main.js` needs none of that — it needs `@nestjs/core`, `mongoose`, `passport-jwt`, and the rest of the runtime dependencies, plus the plain JavaScript `nest build` already emitted into `dist/`. The builder stage is where the first list runs; the runtime stage only ever sees the second. `RUN npm prune --omit=dev` at the end of the builder stage is what makes that split real rather than cosmetic — without it, `node_modules` still has every dev dependency sitting in it after the build finishes, and copying it forward would carry the TypeScript compiler into the image whose only job is to run compiled JavaScript.
+
+A root-level `.dockerignore` matters for a different reason: `docker build` sends its entire build context — every file in the directory `docker build` is pointed at — to the Docker daemon before a single instruction runs. Without a `.dockerignore`, that context includes whatever `node_modules` or `dist` already exist on the machine building the image, which can be gigabytes, entirely irrelevant (they get reinstalled and recompiled inside the container anyway), and in `node_modules`' case, platform-specific — a native module built for a developer's macOS laptop is not what should end up baked into a `node:20-slim` Linux image via a stray `COPY`.
+
+## Pros & cons
+
+**A pruned single builder stage (what we're using) vs. a dedicated third `deps` stage.** Some multi-stage Node Dockerfiles add a separate stage that runs nothing but `npm ci --omit=dev` against `package.json` alone, purely to produce a clean production `node_modules` with no pruning step and no risk of anything built-stage-only leaking through. That third stage costs one more `FROM` line and one more dependency install in the build (a second `npm ci`, this time production-only) — genuinely worth it on a large team where "did the prune actually remove everything it should have" is a real audit question. For `apps/api`'s two-stage build here, `npm prune --omit=dev` reading the same `package.json` that `npm ci` already installed from is precise enough — prune's whole job is reconciling installed packages against `package.json`'s `dependencies`/`devDependencies` split, the exact question this Dockerfile needs answered.
+
+**`node:20-slim` vs. `node:20-alpine`.** `alpine` variants are smaller still — Alpine's `musl` C library and BusyBox userland shave real megabytes off both stages — at the cost of `musl` occasionally behaving subtly differently from the `glibc` that `bcrypt`'s native bindings (installed back in [Backend init](/devblog/en/setup/backend-init/)) were most commonly built and tested against, which can mean a native module that installs cleanly on `slim` failing to build on `alpine` without extra toolchain packages. `slim` — Debian-based, `glibc`, no shell utilities or package manager beyond what Debian's minimal base ships — is the safer default for an app with a native dependency already in its stack; `alpine`'s extra savings are a real option worth revisiting if this image's size becomes an actual operational problem, not a default to reach for automatically.
+
+## Set it up
+
+Create `.dockerignore` at the repo root (`devblog/.dockerignore`):
+
+```txt
+**/node_modules
+**/dist
+**/.next
+**/coverage
+.git
+.env
+.env.local
+**/*.log
+.DS_Store
+```
+
+This is shared by both Dockerfiles in this module — [The web image](/devblog/en/docker/web-image/)'s build reads the same file, which is why it excludes `.next` and `node_modules` generically (`**/`) rather than naming `apps/api/node_modules` and `apps/web/node_modules` separately.
+
+Create `infra/api.Dockerfile`:
+
+```dockerfile
+# ---- builder ----
+FROM node:20-slim AS builder
+WORKDIR /app/apps/api
+
+COPY apps/api/package.json apps/api/package-lock.json ./
+RUN npm ci
+
+COPY apps/api/ ./
+RUN npm run build
+
+# Reconcile node_modules against package.json's dependencies/devDependencies
+# split now that the TypeScript build is done — nothing dev-only should
+# make it into the runtime stage below.
+RUN npm prune --omit=dev
+
+# ---- runtime ----
+FROM node:20-slim AS runtime
+WORKDIR /app/apps/api
+
+COPY --from=builder /app/apps/api/node_modules ./node_modules
+COPY --from=builder /app/apps/api/dist ./dist
+
+EXPOSE 4000
+CMD ["node", "dist/main.js"]
+```
+
+- **`WORKDIR /app/apps/api` in both stages** keeps the in-container path shaped like the monorepo path it came from — a stack trace's file paths stay recognizable rather than collapsing everything into a bare `/app`.
+- **`COPY apps/api/package.json apps/api/package-lock.json ./` before `COPY apps/api/ ./`** is a Docker layer-caching move: as long as neither file changes, `docker build` reuses the cached `npm ci` layer on every rebuild that only touched source files, instead of reinstalling every dependency from scratch each time.
+- **The build context is the repo root, not `infra/`.** Both `COPY` instructions above read `apps/api/...`, which only resolves if `docker build` is pointed at `devblog/` itself — see the command below.
+- **Nothing here reads `.env`.** `MONGODB_URI`, `JWT_SECRET`, and the rest are supplied at *container run time* through `docker run -e` or, in [The full stack](/devblog/en/docker/compose-full/), Compose's `env_file`/`environment` — never baked into the image. An image that hardcoded a secret at build time would leak it to anyone who could inspect its layers, and would need a full rebuild every time a credential rotated.
+
+Build the image from the repo root:
+
+```bash
+cd devblog
+docker build -f infra/api.Dockerfile -t devblog-api:latest .
+```
+
+## Verify
+
+```bash
+docker images devblog-api
+# REPOSITORY    TAG       IMAGE ID       CREATED          SIZE
+# devblog-api   latest    ...            ... seconds ago  ~180MB
+```
+
+Run it standalone, pointed at whatever MongoDB you already have reachable (the one from [Compose skeleton](/devblog/en/setup/compose-skeleton/), if it's still running):
+
+```bash
+docker run --rm -p 4000:4000 \
+  -e MONGODB_URI="mongodb://devblog:devblog@host.docker.internal:27017/devblog?authSource=admin" \
+  -e JWT_SECRET="change-me-in-prod" \
+  -e WEB_ORIGIN="http://localhost:3000" \
+  devblog-api:latest
+```
+
+`host.docker.internal` resolves to the host machine from inside a container on Docker Desktop — it's the escape hatch this standalone `docker run` needs since there's no Compose network yet to reach `mongo` by container name. [The full stack](/devblog/en/docker/compose-full/) replaces it with a real service name once everything runs together.
+
+```bash
+curl localhost:4000/health
+# {"status":"ok"}
+```
+
+The same `{"status":"ok"}` [The app module](/devblog/en/backend-foundations/app-module/) first returned from `npm run start:dev` — now from a container running only `node` and the compiled output, with no TypeScript compiler, no source `.ts` files, and no dev dependencies anywhere inside it.
+
+## Recap
+
+`infra/api.Dockerfile` is a two-stage build: a `builder` stage that runs `npm ci`, `nest build`, and `npm prune --omit=dev` against the full dependency set, and a `runtime` stage that starts clean from `node:20-slim` and copies forward only the pruned `node_modules` and compiled `dist/`. The repo-root `.dockerignore` keeps the build context free of `node_modules`, build artifacts, and `.env` secrets. `node:20-slim` over `node:20-alpine` is a deliberate choice given `bcrypt`'s native bindings from [Backend init](/devblog/en/setup/backend-init/). No secret is ever baked into the image — `MONGODB_URI`, `JWT_SECRET`, and `WEB_ORIGIN` are all supplied at container run time.
+
+Next: [The web image →](/devblog/en/docker/web-image/)

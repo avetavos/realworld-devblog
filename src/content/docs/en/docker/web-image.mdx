@@ -1,0 +1,159 @@
+---
+title: The web image
+description: "Write infra/web.Dockerfile for Next.js's standalone output, learn why NEXT_PUBLIC_API_URL has to be a build-time ARG, and fix lib/graphql.ts so server components call the API by its container name instead of localhost."
+sidebar:
+  order: 2
+---
+
+## What we're building
+
+`next.config.ts` gains one line, `output: 'standalone'`. `infra/web.Dockerfile` — a multi-stage build for `apps/web`: a **builder** stage that installs dependencies, receives `NEXT_PUBLIC_API_URL` as a build argument, and runs `next build`; a **runtime** stage that copies only `.next/standalone`, `.next/static`, and `public` out of it. Alongside the Dockerfile, a small but load-bearing change to `apps/web/lib/graphql.ts` from [GraphQL client & auth](/devblog/en/frontend-foundations/graphql-client/): `gqlFetch` picks a different endpoint depending on whether it's running on the server or in the browser.
+
+## Why
+
+**`output: 'standalone'` exists because the default Next.js build output isn't self-contained.** A plain `next build` produces `.next/` plus an expectation that `node_modules` — the *entire* `node_modules`, including every package `next start` might transitively need — sits next to it at runtime. That's fine on a machine that already ran `npm install`; it's a poor fit for a Docker image, where every megabyte in `node_modules` is a megabyte in every layer downstream of it forever. `output: 'standalone'` tells Next.js to trace the actual runtime dependency graph — starting from `next start`'s own code path, not from `package.json`'s full dependency list — and emit exactly that traced subset into `.next/standalone`, alongside a `server.js` entry point that runs the app with no separate `next start` command and no full `node_modules` at all.
+
+**Why the runtime stage still copies `.next/static` and `public` by hand.** `server.js` in `.next/standalone` is deliberately minimal — it serves pages and API routes, but by design it does not serve `public/` or `.next/static` itself, on the assumption a real deployment puts a CDN in front of static assets instead of routing them through the Node process. This course has no CDN in front of anything, so both folders need to land next to `server.js` explicitly, or every image in `public/` and every built CSS/JS chunk in `.next/static` 404s the moment the container starts.
+
+**Why `NEXT_PUBLIC_API_URL` has to be a Docker build `ARG`, not a runtime `environment:` entry.** [GraphQL client & auth](/devblog/en/frontend-foundations/graphql-client/) already named the mechanism: Next.js inlines any `NEXT_PUBLIC_`-prefixed variable into the compiled JavaScript bundle at build time — literally replacing every `process.env.NEXT_PUBLIC_API_URL` in the source with the string it held during `next build`, the same way it replaces `process.env.NEXT_PUBLIC_ANALYTICS_ID` in Next's own docs. Once that replacement has happened, the value is baked into a `.js` chunk sitting in `.next/static` — setting `NEXT_PUBLIC_API_URL` as a runtime `environment:` variable on the *container* changes nothing, because nothing in the already-compiled browser bundle reads `process.env` again at runtime. The value has to be correct **before** `next build` runs inside the builder stage, which is exactly what a Docker build `ARG` (turned into an `ENV` for the one `RUN npm run build` step that needs it) provides.
+
+**Why this matters differently for `API_URL_INTERNAL`, introduced below.** `API_URL_INTERNAL` deliberately has no `NEXT_PUBLIC_` prefix — it's read only in server-side code, which re-executes `process.env.API_URL_INTERNAL` on every request against whatever the *running container's* real environment says, not a value frozen at build time. That's why it belongs in Compose's `environment:` list in [The full stack](/devblog/en/docker/compose-full/) instead of a build `ARG` here: a server-only variable can change at deploy time with nothing rebuilt, while a `NEXT_PUBLIC_` variable fundamentally cannot.
+
+**The server-vs-browser split this module actually exists to teach.** Inside Compose, the `web` container and the `api` container share a private network where each is reachable by its service name — `api` resolves to the API container's address, the same way `mongo` already has since [Compose skeleton](/devblog/en/setup/compose-skeleton/). A *browser* on the developer's own machine has no membership in that network at all; it only knows `http://localhost:4000`, the port Compose published to the host. Those are two different, non-interchangeable addresses for the same API, and which one is correct depends entirely on *where the code asking is actually running* — not on anything about the request itself. `gqlFetch` from a Server Component executes inside the `web` container, so it needs `http://api:4000/graphql`. The exact same `gqlFetch`, called from `'use client'` code like `AdminLoginPage`, executes in the visitor's browser, so it needs `http://localhost:4000/graphql`. One function, one file, two correct answers depending on `typeof window`.
+
+## Pros & cons
+
+**`output: 'standalone'` vs. copying the full `node_modules` into the runtime stage.** Copying all of `node_modules` is simpler to reason about — nothing is traced, nothing can be traced *incorrectly*, whatever `npm ci` installed is what ships. The cost is real and large: a full `node_modules` for a Next.js app commonly runs several hundred megabytes, nearly all of it build-time-only tooling (`eslint`, `typescript`, `@types/*`) that `next start` never touches at runtime. `output: 'standalone'`'s dependency trace is precise enough that Vercel documents and recommends it specifically for Docker deployments, at the cost of one extra `next.config` line and two extra `COPY` instructions (`static`, `public`) this lesson's Set it up section walks through by hand.
+
+**A build-time `ARG` for `NEXT_PUBLIC_API_URL` (what we're using) vs. accepting that a public API URL can never change without a rebuild.** There is no third option that keeps `NEXT_PUBLIC_API_URL` both runtime-configurable *and* inlined the way Next.js requires — that trade-off is fixed by how `NEXT_PUBLIC_` variables work, not a choice this Dockerfile makes. What **is** a real choice is naming the consequence rather than hiding it: pointing this same image at a different API origin (a staging environment, a different domain) means a new `docker build --build-arg NEXT_PUBLIC_API_URL=...`, not a new `docker run -e`. A production pipeline that needs one image promoted across environments unchanged would instead route all browser traffic through a same-origin reverse-proxy path (`/api/graphql` proxied server-side) so the public-facing URL never varies — a real pattern, out of scope for this course, which builds one image per Compose stack instead.
+
+## Set it up
+
+Update `apps/web/next.config.ts`:
+
+```ts
+import type { NextConfig } from 'next';
+
+const nextConfig: NextConfig = {
+  output: 'standalone',
+};
+
+export default nextConfig;
+```
+
+Create `infra/web.Dockerfile`:
+
+```dockerfile
+# ---- builder ----
+FROM node:20-slim AS builder
+WORKDIR /app/apps/web
+
+COPY apps/web/package.json apps/web/package-lock.json ./
+RUN npm ci
+
+COPY apps/web/ ./
+
+# NEXT_PUBLIC_ variables are inlined into the browser bundle at build time —
+# this has to be set before `next build` runs, not at container start.
+ARG NEXT_PUBLIC_API_URL
+ENV NEXT_PUBLIC_API_URL=$NEXT_PUBLIC_API_URL
+
+RUN npm run build
+
+# ---- runtime ----
+FROM node:20-slim AS runtime
+WORKDIR /app/apps/web
+
+COPY --from=builder /app/apps/web/.next/standalone ./
+COPY --from=builder /app/apps/web/.next/static ./.next/static
+COPY --from=builder /app/apps/web/public ./public
+
+ENV PORT=3000
+ENV HOSTNAME=0.0.0.0
+
+EXPOSE 3000
+CMD ["node", "server.js"]
+```
+
+- **`ARG NEXT_PUBLIC_API_URL` then `ENV NEXT_PUBLIC_API_URL=$NEXT_PUBLIC_API_URL`** — a Dockerfile `ARG` alone is only visible to `RUN` instructions in the same stage, not to the Node.js process `next build` spawns; re-declaring it as `ENV` is what makes `process.env.NEXT_PUBLIC_API_URL` actually resolve to something inside the build.
+- **`ENV PORT=3000` / `HOSTNAME=0.0.0.0`** — `server.js` from `output: 'standalone'` reads both directly. `0.0.0.0`, not `localhost` or `127.0.0.1`, is what makes the server accept connections arriving from outside the container itself — Compose's published port mapping, or a browser hitting `localhost:3000` on the host, both arrive as external connections as far as the container is concerned.
+- **No `node_modules` copied anywhere in the runtime stage** — `output: 'standalone'`'s whole point is that `.next/standalone` already contains the traced subset it needs, unlike [The API image](/devblog/en/docker/api-image/)'s explicit `COPY --from=builder .../node_modules`.
+
+Update `apps/web/lib/graphql.ts` — the endpoint `gqlFetch` actually calls:
+
+```ts
+export const API_URL = process.env.NEXT_PUBLIC_API_URL!;
+
+// Server Components run inside the `web` container and can't reach the API
+// at `localhost` — that resolves to the web container itself. They reach it
+// by container name instead, over the network Compose creates.
+const SERVER_API_URL = process.env.API_URL_INTERNAL ?? API_URL;
+```
+
+And inside `gqlFetch` itself, replace the hardcoded `fetch(API_URL, init)` call:
+
+```ts
+export async function gqlFetch<T>(
+  query: string,
+  variables?: Record<string, unknown>,
+  opts: GqlOptions = {},
+): Promise<T> {
+  // ...headers and init unchanged from GraphQL client & auth...
+
+  const endpoint = typeof window === 'undefined' ? SERVER_API_URL : API_URL;
+  const res = await fetch(endpoint, init);
+  const json = (await res.json()) as GqlResponse<T>;
+
+  // ...error handling unchanged...
+}
+```
+
+- **`typeof window === 'undefined'`** is the same check [GraphQL client & auth](/devblog/en/frontend-foundations/graphql-client/)'s own `lib/auth.ts` already uses to detect server execution — `window` exists in every browser and in no Node.js process, Server Component or otherwise, so this is a reliable signal with no extra dependency.
+- **`SERVER_API_URL` falls back to `API_URL` when `API_URL_INTERNAL` is unset** — outside Docker, running `apps/web` locally with `npm run dev` against `apps/api` on the host, both the server and the browser reach the API the same way (`http://localhost:4000/graphql`), so this change is entirely inert until [The full stack](/devblog/en/docker/compose-full/) actually sets `API_URL_INTERNAL`.
+- **The browser-side branch is untouched** — `AdminLoginPage`, `PostEditor`, and every other `'use client'` caller from [Admin Dashboard](/devblog/en/admin/) still resolves to `API_URL`, exactly as before this lesson.
+
+Build the image from the repo root, passing the public API URL as a build argument:
+
+```bash
+cd devblog
+docker build -f infra/web.Dockerfile \
+  --build-arg NEXT_PUBLIC_API_URL=http://localhost:4000/graphql \
+  -t devblog-web:latest .
+```
+
+## Verify
+
+```bash
+docker images devblog-web
+# REPOSITORY     TAG       IMAGE ID       CREATED          SIZE
+# devblog-web    latest    ...            ... seconds ago  ~140MB
+```
+
+Confirm the build-time inlining actually happened — search the built JavaScript for the literal URL string, not a `process.env` reference:
+
+```bash
+docker run --rm devblog-web:latest sh -c "grep -rl 'http://localhost:4000/graphql' .next/static | head -1"
+# ./.next/static/chunks/....js
+```
+
+Finding the raw string inside a compiled chunk (rather than finding nothing, or finding `process.env.NEXT_PUBLIC_API_URL` still unreplaced) confirms the `ARG`/`ENV` pair actually reached `next build`, not just the container's runtime environment.
+
+`apps/api` isn't running as a container yet at this point in the course — [The full stack](/devblog/en/docker/compose-full/) is where `web` actually has something to call. For now, confirm the server itself boots cleanly:
+
+```bash
+docker run --rm -p 3000:3000 devblog-web:latest
+```
+
+```txt
+▲ Next.js ...
+- Local:        http://localhost:3000
+✓ Ready in ...ms
+```
+
+Visiting `http://localhost:3000` renders the shell of the page — data fetches against a nonexistent API will fail, which is expected and fine here; the point of this Verify section is confirming `server.js` starts and serves `public`/`.next/static` correctly, not a full working page.
+
+## Recap
+
+`output: 'standalone'` makes Next.js trace its own real runtime dependency graph into `.next/standalone` instead of assuming a full `node_modules` sits alongside it — `infra/web.Dockerfile`'s runtime stage copies that traced output plus `.next/static` and `public` (both deliberately excluded from `server.js` on the assumption a CDN serves them, which this course's stack doesn't have). `NEXT_PUBLIC_API_URL` has to arrive as a Docker build `ARG`, turned into an `ENV` before `next build` runs, because Next.js inlines `NEXT_PUBLIC_`-prefixed variables into the browser bundle at build time — a runtime `environment:` entry would arrive too late to change anything already compiled. `lib/graphql.ts`'s `gqlFetch` now picks between two real, different, correct API addresses — `API_URL_INTERNAL` (a container-network name) on the server, `NEXT_PUBLIC_API_URL` (`localhost`) in the browser — based on nothing more than `typeof window`, falling back to the exact behavior it always had outside Docker.
+
+Next: [The full stack →](/devblog/en/docker/compose-full/)
