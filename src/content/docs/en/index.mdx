@@ -1,6 +1,81 @@
 ---
 title: DevBlog
-description: A hands-on, bilingual course where you build DevBlog, a real-world project.
+description: A hands-on, bilingual course where you build DevBlog, a headless CMS and public blog, with Node/NestJS, MongoDB, code-first GraphQL, and Next.js.
+template: splash
+hero:
+  tagline: Build DevBlog, a headless CMS and public blog, from an empty repo to a running Docker Compose stack. Along the way you'll work with Node/NestJS, MongoDB, code-first GraphQL, and Next.js (App Router) with SSR/ISR.
+  actions:
+    - text: Start here
+      link: /devblog/en/introduction/
+      icon: right-arrow
+      variant: primary
+    - text: Jump to the GraphQL API
+      link: /devblog/en/graphql-api/
+      icon: rocket
 ---
 
-Placeholder landing page — full content coming soon.
+import { Card, CardGrid } from '@astrojs/starlight/components';
+
+## What you'll build
+
+<CardGrid>
+  <Card title="Introduction" icon="open-book">
+    Why DevBlog, how the course is structured, and what you'll have built by the end. [Open →](/devblog/en/introduction/)
+  </Card>
+  <Card title="Setup & Tooling" icon="setting">
+    Install Node, Docker, and the rest of the toolchain, and scaffold the project. [Open →](/devblog/en/setup/)
+  </Card>
+  <Card title="Data Modeling" icon="database">
+    Model posts, tags, comments, and users in MongoDB with Mongoose schemas. [Open →](/devblog/en/data-modeling/)
+  </Card>
+  <Card title="Backend Foundations" icon="server">
+    Stand up the NestJS server, modules, config, and error handling. [Open →](/devblog/en/backend-foundations/)
+  </Card>
+  <Card title="Authentication" icon="approve-check">
+    Add password hashing, login, and JWT sessions so the admin belongs to real users. [Open →](/devblog/en/auth/)
+  </Card>
+  <Card title="GraphQL API" icon="rocket">
+    Serve posts and tags through a code-first GraphQL API with resolvers and DTOs. [Open →](/devblog/en/graphql-api/)
+  </Card>
+  <Card title="Content Workflow" icon="pencil">
+    Turn Markdown into published posts with slugs, validation, and draft states. [Open →](/devblog/en/content-workflow/)
+  </Card>
+  <Card title="Comments" icon="comment-alt">
+    Let readers comment, and give the admin moderation over what goes live. [Open →](/devblog/en/comments/)
+  </Card>
+  <Card title="Frontend Foundations" icon="laptop">
+    Set up the Next.js App Router, layout, and GraphQL data layer for the blog. [Open →](/devblog/en/frontend-foundations/)
+  </Card>
+  <Card title="Public Blog" icon="list-format">
+    Render the home list, post pages, and tag pages with SSR and ISR. [Open →](/devblog/en/public-blog/)
+  </Card>
+  <Card title="Admin Dashboard" icon="code-branch">
+    Build the authenticated admin UI to write, publish, and moderate content. [Open →](/devblog/en/admin/)
+  </Card>
+  <Card title="Testing" icon="approve-check">
+    Cover the backend and frontend with automated tests you can trust. [Open →](/devblog/en/testing/)
+  </Card>
+  <Card title="Docker & Compose" icon="server">
+    Containerize every service and bring the whole stack up with one command. [Open →](/devblog/en/docker/)
+  </Card>
+  <Card title="Wrap-up" icon="star">
+    Review what you built and where to take DevBlog next. [Open →](/devblog/en/wrap-up/)
+  </Card>
+</CardGrid>
+
+## How this guide works
+
+<CardGrid>
+  <Card title="Real, copy-pasteable code" icon="code-branch">
+    Every snippet is real, runnable code you can copy straight into your project — no pseudo-code.
+  </Card>
+  <Card title="Adapts the Learn Hub courses" icon="pencil">
+    Built on patterns from the Learn Hub NestJS and Next.js courses, applied to one real project end to end.
+  </Card>
+  <Card title="Bilingual EN / ไทย" icon="translate">
+    Available in English and ไทย — switch anytime from the top bar.
+  </Card>
+  <Card title="You build it by following along" icon="rocket">
+    This is a build-along guide: you write the code yourself, step by step, not just read about it.
+  </Card>
+</CardGrid>
