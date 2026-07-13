@@ -1,0 +1,271 @@
+---
+title: Frontend tests
+description: "Vitest, jsdom และ unit test ด้วย @testing-library/react สำหรับ PostCard และ CommentForm บวกกับ Playwright e2e sketch สำหรับการอ่านโพสต์แล้วคอมเมนต์"
+sidebar:
+  order: 2
+---
+
+## What we're building
+
+`apps/web/vitest.config.ts` และ `apps/web/vitest.setup.ts` — ตั้งค่า Vitest ด้วย `environment: 'jsdom'` เพื่อให้ component test รันได้โดยไม่ต้องมีเบราว์เซอร์จริง `apps/web/components/PostCard.test.tsx` — render test สำหรับ [`PostCard`](/devblog/th/frontend-foundations/styling/) `apps/web/components/CommentForm.test.tsx` — interaction test สำหรับ [`CommentForm`](/devblog/th/public-blog/post-page/): พิมพ์ลงในฟิลด์ กด submit assert ว่า `gqlFetch` ที่ mock ไว้ถูกเรียกด้วย argument ที่ถูกต้อง ยืนยันว่าข้อความ "awaiting moderation" ปรากฏขึ้น นอกจากนี้ยังมี `apps/web/e2e/read-and-comment.spec.ts` — Playwright `describe` sketch ที่ตั้งชื่อไว้สำหรับ journey เดียวกันแบบ end-to-end โดยจงใจไม่สร้างให้สมบูรณ์
+
+## Why
+
+`PostCard` กับ `CommentForm` เป็น component แบบที่ Vitest + jsdom + `@testing-library/react` ถูกสร้างมาเพื่อสิ่งนี้พอดี: การ render ล้วน ๆ จาก props (`PostCard`) กับ local `useState` บวกกับการเรียกออกไปหนึ่งครั้ง (`CommentForm`) ทั้งสองอย่างนี้ไม่ต้องใช้เบราว์เซอร์จริงในการยืนยันเลย jsdom คือ implementation ของ DOM ที่เขียนด้วย JavaScript ไม่ใช่ rendering engine จริง — ไม่มี layout จริง ไม่มีการ paint จริง และ browser API บางตัวก็ถูก stub หรือไม่มีเลย — แต่มันเร็วพอที่จะรัน component test เป็นร้อยตัวได้ในเวลาไม่ถึงวินาที และมันคือทั้งหมดที่ React Testing Library ต้องการเพื่อ mount component แล้ว query ผลลัพธ์ที่ render ออกมาในแบบที่ผู้ใช้จะทำ (`getByRole`, `getByText`, `getByLabelText`)
+
+test ของ `CommentForm` mock `gqlFetch` เอง จาก `@/lib/graphql` แทนที่จะปล่อยให้มันไปแตะ network จริง — สัญชาตญาณแบบเดียวกับ "mock collaborator แล้วเทสต์ตัวคลาส" ที่ [Backend tests](/devblog/th/testing/backend-tests/) ใช้กับ Mongoose model ของ `PostsService` นั่นทำให้ assertion ของ test แม่นยำ: มันพิสูจน์ว่า `CommentForm` เรียก `gqlFetch` ด้วย mutation ที่ถูกต้องและรูปทรง `{ postId, input }` ที่ถูกต้อง และมันแสดง "Thanks — your comment is awaiting moderation." เมื่อการเรียกนั้น resolve แล้ว — โดยไม่ต้องมี NestJS API ที่รันอยู่จริง ไม่ต้องมี Mongo จริง หรือ network round trip จริงเลยแม้แต่นิดเดียว
+
+แต่ทั้งสอง test ก็ไม่ได้พิสูจน์ว่า API *จริง* ยอมรับสิ่งที่ `CommentForm` ส่งไปด้วย — `gqlFetch` ที่ mock ไว้พิสูจน์ได้แค่ว่า component เรียก mock ของตัวเองถูกต้อง เป็นข้อจำกัดเดียวกับที่ Mongoose `Model` ที่ mock ไว้มีบนฝั่ง backend นี่คือสิ่งที่ Playwright sketch เอ่ยชื่อไว้ตรง ๆ: e2e test ที่ขับเบราว์เซอร์จริงกับ stack ที่รันอยู่จริง (dev server ของ `apps/web` คุยกับ `apps/api` จริงและ Mongo จริง) เป็นชั้นเดียวที่จะจับได้จริงว่าการเรียก `addComment` ของ `CommentForm` เพี้ยนไปจากสิ่งที่ `CommentsResolver` จาก [The comment model](/devblog/th/comments/comment-model/) คาดหวังจริง ๆ คอร์สนี้ sketch รูปทรงของ test นั้นไว้ — ตั้งชื่อ ใส่ `describe` ไว้ ร่างขั้นตอนไว้ — โดยไม่สร้างให้สมบูรณ์ ความซื่อตรงแบบ "เอ่ยชื่อช่องว่าง อย่าแสร้งว่ามันไม่มี" แบบเดียวกับที่ [GraphQL client & auth](/devblog/th/frontend-foundations/graphql-client/) ใช้กับ `revalidateTag` ไปแล้ว
+
+## Pros & cons
+
+**Vitest + jsdom + React Testing Library (component unit test) เทียบกับ Playwright (browser e2e)** component test แบบ jsdom ไม่เคยเปิดเบราว์เซอร์ ไม่เคย start dev server และไม่เคยแตะ network socket เลย — `PostCard.test.tsx` กับ `CommentForm.test.tsx` รวมกันรันเสร็จในเสี้ยววินาที และเมื่อพังก็ isolate ไปที่ component เดียวพร้อม stack trace ชี้ไปที่ assertion ที่พังพอดี ต้นทุนที่ต้องจ่ายก็จริงเช่นกัน: jsdom ไม่ execute layout หรือ paint จริง ดังนั้นบั๊ก CSS ที่เห็นได้แค่ทางสายตาจะมองไม่เห็นเลยสำหรับมัน และมันจับ integration break จริงไม่ได้ เช่น `CommentForm` ส่งชื่อฟิลด์ที่ GraphQL API จริงเพิกเฉยแบบเงียบ ๆ เพราะ `gqlFetch` ถูก mock ออกไปทั้งหมด Playwright จ่ายต้นทุนตรงข้าม — ต้อง launch Chromium จริง ต้องโหลดหน้าจริงกับ `apps/web` ที่รันอยู่ (และสำหรับการรัน end-to-end จริง ๆ ต้องมี `apps/api` กับ Mongo ที่รันอยู่เบื้องหลังด้วย) ดังนั้นแต่ละ test จึงกินเวลาเป็นวินาทีไม่ใช่มิลลิวินาที — แลกกับการเป็นชั้นเดียวที่พิสูจน์ว่า user journey จริงใช้งานได้: คลิกจริง submit form จริง network round trip จริง ผลลัพธ์ที่ render จริง การแบ่งที่ถูกต้องสะท้อน testing pyramid ของฝั่ง backend เป๊ะ ๆ: coverage ส่วนใหญ่ยังอยู่ที่ component unit test เร็ว ๆ และ Playwright e2e test จำนวนน้อยถูกเก็บไว้สำหรับ journey หยิบมือหนึ่ง — อย่างการอ่านโพสต์แล้วคอมเมนต์ — ที่ "สิ่งนี้ใช้งานได้จริงไหมเมื่อประกอบเข้าด้วยกันสำหรับผู้เข้าชมจริง" คือคำถามทั้งหมด
+
+## Set it up
+
+เพิ่ม dev dependency ที่ Vitest กับ Playwright ต้องการเข้าไปใน `apps/web/package.json`:
+
+```json
+{
+  "devDependencies": {
+    "vitest": "^3.0.0",
+    "@vitejs/plugin-react": "^4.3.0",
+    "jsdom": "^25.0.0",
+    "@testing-library/react": "^16.0.0",
+    "@testing-library/jest-dom": "^6.5.0",
+    "@testing-library/user-event": "^14.5.0",
+    "@playwright/test": "^1.48.0"
+  }
+}
+```
+
+สร้าง `apps/web/vitest.config.ts`:
+
+```ts
+import { defineConfig } from 'vitest/config';
+import react from '@vitejs/plugin-react';
+
+export default defineConfig({
+  plugins: [react()],
+  test: {
+    environment: 'jsdom',
+    setupFiles: ['./vitest.setup.ts'],
+  },
+  resolve: {
+    alias: {
+      '@': new URL('./', import.meta.url).pathname,
+    },
+  },
+});
+```
+
+สร้าง `apps/web/vitest.setup.ts`:
+
+```ts
+import '@testing-library/jest-dom/vitest';
+import { cleanup } from '@testing-library/react';
+import { afterEach } from 'vitest';
+
+afterEach(() => {
+  cleanup();
+});
+```
+
+- **`environment: 'jsdom'`** คือ option เดียวที่ทำให้ `render()` จาก `@testing-library/react` เป็นไปได้เลย — environment `node` ที่เป็นค่า default ของ Vitest ไม่มี `document`/`window` ให้ component mount เข้าไปได้
+- **`resolve.alias['@']`** สะท้อน path mapping `@/*` ที่ `apps/web/tsconfig.json` ประกาศไว้แล้วสำหรับ Next.js เอง — ทุก `import ... from '@/lib/graphql'` ใน `CommentForm.tsx`/`PostCard.tsx` ต้องการให้ Vitest ซึ่งเป็นเครื่องมือ build คนละตัวกับ bundler ของ Next เอง resolve alias นี้ในแบบเดียวกัน
+- **`@testing-library/jest-dom/vitest`** ไม่ใช่ `@testing-library/jest-dom` เปล่า ๆ — นี่คือ entry point เฉพาะของ Vitest ที่ลงทะเบียน matcher อย่าง `.toBeInTheDocument()`/`.toHaveTextContent()` เข้ากับ `expect` ของ Vitest เอง ไม่ใช่ของ Jest
+- **`cleanup()` ใน `afterEach`** unmount สิ่งที่ test ก่อนหน้า render ลงใน document ที่ jsdom ใช้ร่วมกัน เพื่อไม่ให้ DOM ที่เหลือจาก test หนึ่งรั่วไปปนกับ query ของ test ถัดไป
+
+สร้าง `apps/web/components/PostCard.test.tsx`:
+
+```tsx
+import { render, screen } from '@testing-library/react';
+import { describe, expect, it, vi } from 'vitest';
+import { PostCard } from './PostCard';
+import type { Post } from '@/lib/graphql';
+
+vi.mock('next/link', () => ({
+  default: ({
+    href,
+    children,
+    className,
+  }: {
+    href: string;
+    children: React.ReactNode;
+    className?: string;
+  }) => (
+    <a href={href} className={className}>
+      {children}
+    </a>
+  ),
+}));
+
+type CardPost = Pick<Post, 'title' | 'slug' | 'excerpt' | 'coverImage' | 'tags' | 'publishedAt'>;
+
+const basePost: CardPost = {
+  title: 'Hello, DevBlog',
+  slug: 'hello-devblog',
+  excerpt: 'This is the first post.',
+  coverImage: undefined,
+  tags: ['nestjs', 'graphql'],
+  publishedAt: '2026-01-01T00:00:00.000Z',
+};
+
+describe('PostCard', () => {
+  it('renders the title, excerpt, tags, and a link to the post', () => {
+    render(<PostCard post={basePost} />);
+
+    expect(screen.getByRole('heading', { name: 'Hello, DevBlog' })).toBeInTheDocument();
+    expect(screen.getByText('This is the first post.')).toBeInTheDocument();
+    expect(screen.getByText('nestjs, graphql')).toBeInTheDocument();
+    expect(screen.getByRole('link')).toHaveAttribute('href', '/posts/hello-devblog');
+  });
+
+  it('omits the excerpt and the cover image when neither is set', () => {
+    const post: CardPost = { ...basePost, excerpt: undefined, coverImage: undefined };
+
+    render(<PostCard post={post} />);
+
+    expect(screen.queryByText('This is the first post.')).not.toBeInTheDocument();
+    expect(screen.queryByRole('img')).not.toBeInTheDocument();
+  });
+});
+```
+
+- **`vi.mock('next/link', ...)`** แทนที่ `Link` ของ Next ด้วย `<a>` ธรรมดาตลอดไฟล์นี้ — `PostCard` ต้องการแค่ให้ `Link` render anchor ที่มี `href` เท่านั้น mock นี้จึงทำให้ test เป็นอิสระจาก router context ของ Next เอง แทนที่จะไป assert อะไรเกี่ยวกับ internal ของ Next
+- **`screen.queryByText`/`queryByRole` ไม่ใช่ `getByText`/`getByRole` ใน test ที่สอง** — `query*` คืนค่า `null` เมื่อไม่พบ element แทนที่จะ throw ซึ่งเป็นสิ่งที่การ assert การ *ไม่มีอยู่* ของ element ต้องการพอดี `get*` จะทำให้ test พังด้วย error "unable to find element" ที่ไม่มีประโยชน์ ก่อนที่ assertion `not.toBeInTheDocument()` จะได้รันเลยด้วยซ้ำ
+
+สร้าง `apps/web/components/CommentForm.test.tsx`:
+
+```tsx
+import { render, screen, waitFor } from '@testing-library/react';
+import userEvent from '@testing-library/user-event';
+import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { CommentForm } from './CommentForm';
+import { gqlFetch } from '@/lib/graphql';
+
+vi.mock('@/lib/graphql', () => ({
+  gqlFetch: vi.fn(),
+}));
+
+const mockedGqlFetch = vi.mocked(gqlFetch);
+
+describe('CommentForm', () => {
+  beforeEach(() => {
+    mockedGqlFetch.mockReset();
+  });
+
+  it('submits the form through gqlFetch and shows the awaiting-moderation message', async () => {
+    mockedGqlFetch.mockResolvedValue({
+      addComment: {
+        id: 'c1',
+        authorName: 'Alex',
+        body: 'Great post, thanks for writing this up!',
+        createdAt: '2026-01-01T00:00:00.000Z',
+      },
+    });
+
+    const user = userEvent.setup();
+    render(<CommentForm postId="post-1" />);
+
+    await user.type(screen.getByLabelText('Name'), 'Alex');
+    await user.type(screen.getByLabelText('Email'), 'alex@example.com');
+    await user.type(screen.getByLabelText('Comment'), 'Great post, thanks for writing this up!');
+    await user.click(screen.getByRole('button', { name: /submit comment/i }));
+
+    await waitFor(() => {
+      expect(mockedGqlFetch).toHaveBeenCalledTimes(1);
+    });
+    expect(mockedGqlFetch).toHaveBeenCalledWith(expect.stringContaining('mutation AddComment'), {
+      postId: 'post-1',
+      input: {
+        authorName: 'Alex',
+        authorEmail: 'alex@example.com',
+        body: 'Great post, thanks for writing this up!',
+      },
+    });
+    expect(
+      await screen.findByText('Thanks — your comment is awaiting moderation.'),
+    ).toBeInTheDocument();
+  });
+
+  it('shows the GraphQL error message and keeps the form visible when gqlFetch rejects', async () => {
+    mockedGqlFetch.mockRejectedValue(new Error('Cannot comment on a post that is not published'));
+
+    const user = userEvent.setup();
+    render(<CommentForm postId="post-1" />);
+
+    await user.type(screen.getByLabelText('Name'), 'Alex');
+    await user.type(screen.getByLabelText('Email'), 'alex@example.com');
+    await user.type(screen.getByLabelText('Comment'), 'First!');
+    await user.click(screen.getByRole('button', { name: /submit comment/i }));
+
+    expect(await screen.findByRole('alert')).toHaveTextContent(
+      'Cannot comment on a post that is not published',
+    );
+    expect(screen.getByRole('button', { name: /submit comment/i })).toBeInTheDocument();
+  });
+});
+```
+
+- **`vi.mock('@/lib/graphql', ...)` บวกกับ `vi.mocked(gqlFetch)`** แทนที่ `gqlFetch` จริงด้วย `vi.fn()` ตลอดไฟล์นี้ และ `vi.mocked()` คืน handle ของ mock ที่มี type ถูกต้อง (`.mockResolvedValue`/`.mockRejectedValue`) แทนที่จะต้อง cast มือเปล่า
+- **`getByLabelText('Name')` หา `<input>` ที่ซ้อนอยู่ใน `<label>Name<input ... /></label>`** — Testing Library resolve ความสัมพันธ์ label แบบ implicit นี้เหมือนกับที่ screen reader จะทำ โดยไม่ต้องมีคู่ `htmlFor`/`id` เลย เพราะ `CommentForm.tsx` ไม่เคยเพิ่มมันเข้าไป
+- **`await waitFor(() => expect(mockedGqlFetch).toHaveBeenCalledTimes(1))`** — `handleSubmit` เป็น `async`; ถ้าไม่รอ assertion อาจรันก่อนที่การเรียก `gqlFetch` ที่ await ไว้จะเกิดขึ้นจริงด้วยซ้ำ
+- **ข้อความ success เป๊ะ ๆ `'Thanks — your comment is awaiting moderation.'`** ถูก assert แบบตัวอักษรต่อตัวอักษรตรงกับ JSX จริงของ `CommentForm.tsx` จาก [Post page](/devblog/th/public-blog/post-page/) — test ที่เฉพาะเจาะจงขนาดนี้จะจับการเปลี่ยนคำในข้อความนั้นเป็น diff ที่มองเห็นได้จริง ไม่ใช่ผ่านเฉย ๆ ไม่ว่าจะเปลี่ยนคำว่าอะไร
+- **test ที่สองพิสูจน์ branch `catch`** ไม่ใช่แค่ happy path — `err instanceof Error ? err.message : '...'` ใน `CommentForm.tsx` หมายความว่าการเรียก `gqlFetch` ที่ reject จะแสดงข้อความจริงผ่าน `role="alert"` และ form ยังคง mount อยู่ (`submitted` ไม่กลายเป็น `true`) เพื่อให้ผู้ใช้แก้ input แล้วลองใหม่ได้
+
+สร้าง `apps/web/e2e/read-and-comment.spec.ts` — sketch ไม่ใช่ test ที่สร้างเสร็จสมบูรณ์:
+
+```ts
+import { test, expect } from '@playwright/test';
+
+test.describe('reading a post and leaving a comment', () => {
+  test('a visitor can open a published post and submit a comment', async ({ page }) => {
+    // 1. Visit the home list and open the first published post.
+    await page.goto('/');
+    await page.getByRole('link').first().click();
+
+    // 2. Fill in and submit the comment form.
+    // await page.getByLabel('Name').fill('Alex');
+    // await page.getByLabel('Email').fill('alex@example.com');
+    // await page.getByLabel('Comment').fill('Great post, thanks for writing this up!');
+    // await page.getByRole('button', { name: 'Submit comment' }).click();
+
+    // 3. Assert the "awaiting moderation" message replaces the form.
+    // await expect(page.getByText('Thanks — your comment is awaiting moderation.')).toBeVisible();
+
+    // TODO: needs a real apps/api + at least one published, seeded post before
+    // this can run for real — see Docker & Compose for standing up the whole
+    // stack this e2e test would run against.
+  });
+});
+```
+
+- **`test.describe`/`test` ถูกตั้งชื่อตรงตาม journey ที่มันเป็นตัวแทน** — "reading a post and leaving a comment" — แม้ว่า body ของขั้นตอนที่ 2 กับ 3 จะถูก comment ไว้ก็ตาม การตั้งชื่อ test ก่อนที่มันจะรันได้จริงเป็นเรื่องจงใจ: ชื่อนี้คือสิ่งแรกที่ CI dashboard หรือเพื่อนร่วมทีมที่ไล่ดูไฟล์นี้จะเห็น และมันควรอธิบาย user journey จริงไม่ว่า implementation จะมีอยู่มากน้อยแค่ไหนก็ตาม
+- **sketch นี้พึ่งพา infrastructure ที่ module นี้ไม่ได้ตั้งขึ้นมาให้** — `apps/api` จริง, Mongo จริง, และโพสต์ที่ publish แล้วอย่างน้อยหนึ่งอันที่ seed ไว้แล้ว [Docker & Compose](/devblog/th/docker/) คือจุดที่ stack ทั้งหมดกลายเป็น `docker compose up` คำสั่งเดียว ซึ่งเป็นสิ่งที่จะทำให้ test นี้รันได้จริงแทนที่จะเป็นแค่ความตั้งใจ
+- **Playwright เองมี API `page.goto`/`getByRole`/`getByLabel` ที่จงใจให้มีรูปทรงเดียวกับ query ของ React Testing Library** — ผู้อ่านที่คุ้นกับ `CommentForm.test.tsx` ข้างบนแล้วก็แทบจะอ่านโค้ด Playwright จริงได้เลย ซึ่งเป็นเหตุผลพอดีว่าทำไม sketch นี้ถึงคุ้มค่าที่จะใส่ไว้แม้จะยังไม่เสร็จ
+
+## Verify
+
+```bash
+cd apps/web
+npm run test
+```
+
+```txt
+ ✓ components/PostCard.test.tsx (2 tests) 15ms
+ ✓ components/CommentForm.test.tsx (2 tests) 120ms
+
+ Test Files  2 passed (2)
+      Tests  4 passed (4)
+   Start at  10:15:00
+   Duration  850ms
+```
+
+`read-and-comment.spec.ts` ไม่ได้รันตรงนี้เลย — pattern `include` ของ Vitest เก็บเฉพาะไฟล์ `.test.tsx` เท่านั้น และ Playwright test ก็รันผ่านคำสั่ง `npx playwright test` ของตัวเองต่างหาก กับแอปที่รันอยู่จริง ไม่ใช่ผ่าน `npm run test` การแยกกันแบบนี้เป็นเรื่องจงใจ: component unit test suite ควรเร็วพอที่จะรันได้ทุกครั้งที่ save ส่วน e2e suite ที่ต้องมี stack ที่รันอยู่จริงทั้งชุดไม่ควรมาบล็อก feedback loop นั้น
+
+## Recap
+
+`PostCard.test.tsx` กับ `CommentForm.test.tsx` รันอยู่ใน jsdom ทั้งหมด โดย `gqlFetch` ถูก mock ออกจาก `CommentForm` ในแบบเดียวกับที่ Mongoose model ของ `PostsService` ถูก mock บนฝั่ง backend — เร็ว isolate และชี้ได้แม่นยำว่า component ไหนพังเมื่อ test ล้มเหลว `environment: 'jsdom'` ใน `vitest.config.ts` บวกกับ `@testing-library/jest-dom/vitest` ใน `vitest.setup.ts` คือ setup ทั้งหมดที่ทำให้ `render()`/`screen`/`.toBeInTheDocument()` ใช้งานได้ `read-and-comment.spec.ts` เอ่ยชื่อสิ่งเดียวที่ unit test แบบ mock ไหน ๆ ก็พิสูจน์ไม่ได้ — ว่าแอปจริงที่ประกอบเข้าด้วยกันใช้งานได้จริงสำหรับผู้เข้าชมจริง — เป็น Playwright sketch ที่ปล่อยไว้ไม่สมบูรณ์อย่างซื่อตรง จนกว่า [Docker & Compose](/devblog/th/docker/) จะตั้ง stack ที่มันต้องการรันด้วยขึ้นมา การแลกแบบ testing pyramid เดียวกับที่ [Backend tests](/devblog/th/testing/backend-tests/) เอ่ยไว้ — ความเร็วกับการ isolate ที่ฐาน ความแม่นยำกับความมั่นใจที่ยอด — ก็นำมาใช้กับฝั่ง frontend ได้เป๊ะเหมือนที่ใช้กับ API
+
+ถัดไป: [Docker & Compose →](/devblog/th/docker/)

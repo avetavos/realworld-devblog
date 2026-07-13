@@ -1,0 +1,310 @@
+---
+title: Backend tests
+description: "Jest unit test สำหรับ SlugService และ PostsService ด้วย dependency ที่ mock ไว้ บวกกับ integration test ด้วย mongodb-memory-server ที่พิสูจน์ flow draft→published กับ Mongo จริงแบบ ephemeral"
+sidebar:
+  order: 1
+---
+
+## What we're building
+
+`apps/api/src/common/slug.service.spec.ts` — unit test แบบ `@nestjs/testing` ของ `SlugService.generateUnique` จาก [Slugs & validation](/devblog/th/content-workflow/slugs-validation/) ขับเคลื่อนด้วย fake `exists` predicate เพื่อพิสูจน์ loop การเติม suffix `-2`/`-3` `apps/api/src/posts/posts.service.spec.ts` — unit test ของ `PostsService.findPage` จาก [Refactoring pass](/devblog/th/content-workflow/refactoring-pass/) โดย mock Mongoose model ออกไปผ่าน `getModelToken` จากนั้นมี helper เล็ก ๆ `apps/api/src/testing/mongo-memory.setup.ts` ที่ห่อ `mongodb-memory-server` ไว้ และ `apps/api/src/posts/posts.integration.spec.ts` — integration test ที่บูต `mongod` จริงแบบใช้แล้วทิ้ง แล้ว assert flow draft→publish ทั้งหมด: `create` draft ยืนยันว่ามันหายไปจาก `findPage({ status: PUBLISHED })` ฝั่งสาธารณะ `publish` มัน แล้วยืนยันว่ามันปรากฏแล้ว
+
+## Why
+
+**testing pyramid** เป็นรูปทรง ไม่ใช่แค่คำขวัญ: unit test เร็ว ๆ จำนวนมากอยู่ฐานล่าง integration test จำนวนน้อยลงอยู่ตรงกลาง และ end-to-end test จำนวนน้อยที่สุดอยู่บนสุด
+
+```txt
+        /\
+       /e2e\        few — whole app, real network, slowest, highest confidence
+      /------\
+     /integr. \     some — one real boundary (a real Mongo), one flow at a time
+    /----------\
+   /    unit    \   many — one class, every dependency mocked, milliseconds each
+  /--------------\
+```
+
+แต่ละชั้นได้ที่ยืนของตัวเองด้วยการแลกความเร็วกับความแม่นยำ (fidelity) `SlugService.generateUnique` ไม่มี Mongoose อยู่ในตัวมันเลย — มันเป็น loop ล้วน ๆ รอบ predicate ที่ผู้เรียกส่งมาให้ — unit test ที่ป้อน fake `exists` function เข้าไปแล้ว assert ลำดับ suffix จึงรันเสร็จในเสี้ยววินาที และถ้าพังก็พังด้วยเหตุผลเดียวชัดเจน `PostsService.findPage` ก็มีตรรกะแตกแขนงจริงที่คุ้มค่าจะเทสต์เดี่ยว ๆ เหมือนกัน (ค่า default เป็น `PUBLISHED`, ห้าม request `DRAFT` แบบไม่ระบุตัวตน, จำกัด request `DRAFT` ของ non-admin ให้เห็นแค่โพสต์ของตัวเอง) — การ mock `postModel.find`/`countDocuments` แยกตรรกะแตกแขนงนี้ออกจาก Mongo ไปเลย ทำให้ test พิสูจน์แค่ *filter object* ที่ `findPage` สร้างขึ้น ไม่ใช่ว่า Mongo จะยอมรับมันจริงหรือเปล่า
+
+จุดหลังนี่เองที่การ mock model หยุดพอ mock `Model` พิสูจน์ได้แค่ว่า `PostsService` เรียก `find` ด้วย argument ที่ test คาดไว้ — มันจับบั๊กระดับ schema จริงไม่ได้เลย (ลืม `unique: true` บน `slug`, ค่า `enum` ผิด, `$ne` ทำงานต่างจากที่สมมติไว้) และพิสูจน์ไม่ได้ว่า *ข้อมูล* ที่ได้กลับมาตรงกับที่เขียนไปจริงหรือเปล่า เพราะไม่มี document store จริงอยู่เบื้องหลังเลย `mongodb-memory-server` ปิดช่องว่างนี้: มันดาวน์โหลดและบูต process `mongod` จริงแบบ ephemeral ในการรันครั้งแรก จากนั้น test ก็เชื่อม `MongooseModule.forRoot()` เข้ากับ URI ของ instance นั้น เหมือนกับที่ `apps/api` เชื่อมกับ deployment จริงเป๊ะ **repository-style test** — test ที่ประเด็นทั้งหมดคือ "สิ่งที่บันทึกไปกลับมาตรงกับที่คาดไว้ไหม" — ได้ความมั่นใจจริงจากตรงนี้: `create()` เขียน document จริงด้วย casting และ validator จริงของ Mongoose `findPage({ status: PUBLISHED })` กรองผ่าน query engine จริง และ test นี้จะจับการเปลี่ยน `enum` ของ `Post.status` หรือ index ที่พังได้เหมือนกับที่ Mongo จริงในโปรดักชันจะจับ
+
+## Pros & cons
+
+**Mock `Model` ผ่าน `getModelToken` (unit) เทียบกับ `mongodb-memory-server` (integration)** mock model ไม่มีต้นทุนในการบูตเลย — ไม่ต้องดาวน์โหลด binary ไม่ต้อง start process — ทำให้ suite ที่สร้างจาก mock ล้วน ๆ ยังอยู่ในระดับหลักสิบมิลลิวินาทีแม้จะมีเป็นร้อย test และเมื่อพังก็ isolate ไปที่คลาสเดียวที่กำลังเทสต์เสมอ เพราะทุก collaborator เป็น `jest.fn()` ที่ test เองควบคุมพฤติกรรม ต้นทุนที่ต้องจ่ายคือช่องว่างด้าน fidelity ข้างบนพอดี — mock อาจ drift ไปจากสิ่งที่ Mongoose ทำจริงแบบเงียบ ๆ และไม่มีอะไรจับ drift นั้นได้จนกว่าจะไปเจอ environment จริง `mongodb-memory-server` จ่ายต้นทุนจริงต่อไฟล์ test — ตั้งแต่หลักร้อยมิลลิวินาทีถึงสองสามวินาทีในการ start `mongod` ครั้งแรก — แลกกับการใช้งาน persistence path จริง: schema validation จริง, การบังคับ unique index จริง, การกรอง query จริง การแบ่งที่ถูกต้องไม่ใช่ "เลือกอย่างใดอย่างหนึ่ง" — แต่คือให้ suite ส่วนใหญ่ยังเป็น unit (เร็ว, isolate, ตรรกะทีละสาขา) โดยเก็บ integration test จำนวนหนึ่งไว้สำหรับ flow ที่ "สิ่งนี้ persist ถูกต้องจริงไหม" คือคำถามทั้งหมด อย่างที่ draft→publish เป็นตรงนี้
+
+## Set it up
+
+ติดตั้ง `mongodb-memory-server` เป็น dev dependency ใน devblog API project:
+
+```bash
+cd apps/api
+npm install --save-dev mongodb-memory-server
+```
+
+`devDependencies` ใน `package.json` ตอนนี้มีมันอยู่ควบคู่กับสิ่งที่ `nest new` scaffold ไว้ให้อยู่แล้ว:
+
+```json
+{
+  "devDependencies": {
+    "@nestjs/testing": "^10.0.0",
+    "jest": "^29.5.0",
+    "mongodb-memory-server": "^9.1.6",
+    "ts-jest": "^29.1.0"
+  }
+}
+```
+
+สร้าง `apps/api/src/common/slug.service.spec.ts`:
+
+```ts
+import { Test } from '@nestjs/testing';
+import { SlugService } from './slug.service';
+
+describe('SlugService', () => {
+  let slugService: SlugService;
+
+  beforeEach(async () => {
+    const moduleRef = await Test.createTestingModule({
+      providers: [SlugService],
+    }).compile();
+
+    slugService = moduleRef.get(SlugService);
+  });
+
+  it('returns the plain slug when nothing collides', async () => {
+    const exists = jest.fn().mockResolvedValue(false);
+
+    const slug = await slugService.generateUnique('Hello, DevBlog', exists);
+
+    expect(slug).toBe('hello-devblog');
+    expect(exists).toHaveBeenCalledTimes(1);
+    expect(exists).toHaveBeenCalledWith('hello-devblog');
+  });
+
+  it('appends -2 when the base slug is already taken once', async () => {
+    const exists = jest
+      .fn()
+      .mockResolvedValueOnce(true) // 'hello-devblog' is taken
+      .mockResolvedValueOnce(false); // 'hello-devblog-2' is free
+
+    const slug = await slugService.generateUnique('Hello, DevBlog', exists);
+
+    expect(slug).toBe('hello-devblog-2');
+    expect(exists).toHaveBeenCalledTimes(2);
+  });
+
+  it('keeps incrementing the suffix until a free candidate is found', async () => {
+    const exists = jest
+      .fn()
+      .mockResolvedValueOnce(true) // 'hello-devblog'
+      .mockResolvedValueOnce(true) // 'hello-devblog-2'
+      .mockResolvedValueOnce(false); // 'hello-devblog-3' is free
+
+    const slug = await slugService.generateUnique('Hello, DevBlog', exists);
+
+    expect(slug).toBe('hello-devblog-3');
+    expect(exists).toHaveBeenCalledTimes(3);
+  });
+});
+```
+
+สร้าง `apps/api/src/posts/posts.service.spec.ts`:
+
+```ts
+import { Test } from '@nestjs/testing';
+import { getModelToken } from '@nestjs/mongoose';
+import { ForbiddenException } from '@nestjs/common';
+import { PostsService } from './posts.service';
+import { Post } from './schemas/post.schema';
+import { PostStatus } from './enums/post-status.enum';
+import { SlugService } from '../common/slug.service';
+import { ExcerptService } from '../common/excerpt.service';
+
+describe('PostsService.findPage', () => {
+  let postsService: PostsService;
+  let postModel: { find: jest.Mock; countDocuments: jest.Mock };
+
+  const fakeItems = [{ id: '1', title: 'A post' }];
+
+  beforeEach(async () => {
+    const findChain = {
+      sort: jest.fn().mockReturnThis(),
+      skip: jest.fn().mockReturnThis(),
+      limit: jest.fn().mockReturnThis(),
+      exec: jest.fn().mockResolvedValue(fakeItems),
+    };
+
+    postModel = {
+      find: jest.fn().mockReturnValue(findChain),
+      countDocuments: jest.fn().mockReturnValue({
+        exec: jest.fn().mockResolvedValue(fakeItems.length),
+      }),
+    };
+
+    const moduleRef = await Test.createTestingModule({
+      providers: [
+        PostsService,
+        { provide: getModelToken(Post.name), useValue: postModel },
+        { provide: SlugService, useValue: { generateUnique: jest.fn() } },
+        { provide: ExcerptService, useValue: { derive: jest.fn() } },
+      ],
+    }).compile();
+
+    postsService = moduleRef.get(PostsService);
+  });
+
+  it('defaults to status: PUBLISHED when no options are given', async () => {
+    const result = await postsService.findPage();
+
+    expect(postModel.find).toHaveBeenCalledWith({ status: PostStatus.PUBLISHED });
+    expect(result.items).toEqual(fakeItems);
+    expect(result.total).toBe(1);
+  });
+
+  it('throws ForbiddenException for status: DRAFT with no requesting user', async () => {
+    await expect(postsService.findPage({ status: PostStatus.DRAFT })).rejects.toBeInstanceOf(
+      ForbiddenException,
+    );
+    expect(postModel.find).not.toHaveBeenCalled();
+  });
+
+  it("scopes status: DRAFT to the caller's own posts when the requester is not an admin", async () => {
+    await postsService.findPage({
+      status: PostStatus.DRAFT,
+      requestingUser: { userId: 'author-1', email: 'a@example.com', role: 'author' },
+    });
+
+    expect(postModel.find).toHaveBeenCalledWith({
+      status: PostStatus.DRAFT,
+      author: 'author-1',
+    });
+  });
+});
+```
+
+- **`getModelToken(Post.name)` + `useValue`** คือ pattern มาตรฐานของ `@nestjs/testing` สำหรับแทนที่ `@InjectModel(Post.name)` — constructor ของ `PostsService` ไม่รู้เลยว่าออบเจกต์ธรรมดานี้กับ Mongoose `Model` จริงต่างกันตรงไหน
+- **`SlugService`/`ExcerptService` ก็ถูก mock ด้วย แม้ว่า `findPage` จะไม่เรียกมันเลย** — constructor ของ `PostsService` ต้องการให้ collaborator ทั้งสามตัว resolve ได้ก่อนที่ `Test.createTestingModule(...).compile()` จะสำเร็จ `{ generateUnique: jest.fn() }` ธรรมดา ๆ ก็เพียงพอให้ DI container ผ่านได้โดยไม่ต้องดึงตรรกะจริงของ `SlugService` เข้ามาเลย
+- **สาม test นี้สะท้อนสามสาขาจริงของ `findPage`** จาก [Refactoring pass](/devblog/th/content-workflow/refactoring-pass/): ไม่ระบุ `status` จะ default เป็น `PUBLISHED`; `DRAFT` โดยไม่มี `requestingUser` จะ throw ก่อนแตะ `postModel` เลย; `DRAFT` จาก non-admin จะเติม `author` เข้าไปใน filter สาขาที่สี่ — admin ที่ขอ `DRAFT` เห็น draft ของทุกคน — ปล่อยไว้เป็นแบบฝึกหัดให้ผู้อ่าน ตามรูปแบบเดียวกับ test ที่สาม แค่เปลี่ยนเป็น `role: 'admin'` และไม่คาดหวัง key `author` ใน filter
+
+สร้าง `apps/api/src/testing/mongo-memory.setup.ts` — helper สำหรับ setup ที่ใช้ร่วมกัน ซึ่ง integration test ด้านล่าง import ไปใช้:
+
+```ts
+import { MongoMemoryServer } from 'mongodb-memory-server';
+
+let mongod: MongoMemoryServer | null = null;
+
+export async function startInMemoryMongo(): Promise<string> {
+  mongod = await MongoMemoryServer.create();
+  return mongod.getUri();
+}
+
+export async function stopInMemoryMongo(): Promise<void> {
+  if (mongod) {
+    await mongod.stop();
+    mongod = null;
+  }
+}
+```
+
+สร้าง `apps/api/src/posts/posts.integration.spec.ts`:
+
+```ts
+import { Test, TestingModule } from '@nestjs/testing';
+import { MongooseModule, getModelToken } from '@nestjs/mongoose';
+import { Model, Types } from 'mongoose';
+import { PostsService } from './posts.service';
+import { Post, PostDocument, PostSchema } from './schemas/post.schema';
+import { PostStatus } from './enums/post-status.enum';
+import { SlugService } from '../common/slug.service';
+import { ExcerptService } from '../common/excerpt.service';
+import { startInMemoryMongo, stopInMemoryMongo } from '../testing/mongo-memory.setup';
+
+describe('PostsService (integration, mongodb-memory-server)', () => {
+  let moduleRef: TestingModule;
+  let postsService: PostsService;
+
+  beforeAll(async () => {
+    const uri = await startInMemoryMongo();
+
+    moduleRef = await Test.createTestingModule({
+      imports: [
+        MongooseModule.forRoot(uri),
+        MongooseModule.forFeature([{ name: Post.name, schema: PostSchema }]),
+      ],
+      providers: [PostsService, SlugService, ExcerptService],
+    }).compile();
+
+    postsService = moduleRef.get(PostsService);
+  });
+
+  afterEach(async () => {
+    const postModel = moduleRef.get<Model<PostDocument>>(getModelToken(Post.name));
+    await postModel.deleteMany({});
+  });
+
+  afterAll(async () => {
+    await moduleRef.close();
+    await stopInMemoryMongo();
+  });
+
+  it('keeps a new draft out of the public findPage({ status: PUBLISHED }) result', async () => {
+    const authorId = new Types.ObjectId().toString();
+
+    const draft = await postsService.create(authorId, {
+      title: 'Hello, DevBlog',
+      body: 'This is the first post.',
+    });
+    expect(draft.status).toBe(PostStatus.DRAFT);
+
+    const beforePublish = await postsService.findPage({ status: PostStatus.PUBLISHED });
+    expect(beforePublish.total).toBe(0);
+    expect(beforePublish.items).toHaveLength(0);
+  });
+
+  it('surfaces the post in findPage({ status: PUBLISHED }) once it has been published', async () => {
+    const authorId = new Types.ObjectId().toString();
+    const draft = await postsService.create(authorId, {
+      title: 'Hello, DevBlog',
+      body: 'This is the first post.',
+    });
+
+    await postsService.publish(draft.id);
+
+    const afterPublish = await postsService.findPage({ status: PostStatus.PUBLISHED });
+    expect(afterPublish.total).toBe(1);
+    expect(afterPublish.items[0].slug).toBe('hello-devblog');
+    expect(afterPublish.items[0].publishedAt).toBeInstanceOf(Date);
+  });
+});
+```
+
+- **`MongooseModule.forRoot(uri)` ไม่ใช่ `mongoose.connect()` มือเปล่า** — การชี้ Mongoose integration ของ Nest เองไปที่ URI ของ memory server ทำให้ `MongooseModule.forFeature` ทำงานเหมือนกับตอนอยู่กับ deployment จริงเป๊ะ และ `moduleRef.close()` ด้านล่างก็รื้อ connection ผ่าน lifecycle hook เดียวกับที่ bootstrap จริงของ `apps/api` พึ่งพา
+- **`SlugService`/`ExcerptService` เป็น instance จริงตรงนี้ ไม่ใช่ mock** — ต่างจาก unit test ข้างบน ประเด็นทั้งหมดของ test นี้คือพิสูจน์พฤติกรรมจริงของ `create()` ตั้งแต่ต้นจนจบ ซึ่งรวมถึง slug จริงที่มันสร้าง (`hello-devblog` ตรงกับผลลัพธ์ Verify ของ [Slugs & validation](/devblog/th/content-workflow/slugs-validation/) เอง)
+- **`afterEach` ล้าง `postModel`, `afterAll` รื้อ module กับ server ทิ้ง** — แต่ละ test เริ่มจาก collection ว่างโดยไม่ต้องจ่ายค่าบูต `mongod` ใหม่ทุก test และ `moduleRef.close()` รันก่อน `stopInMemoryMongo()` เพื่อให้ Mongoose connection ปิดเรียบร้อยก่อนที่ process เบื้องหลังจะหยุด
+- **การไม่ mock `SlugService`/`ExcerptService` ตรงนี้หมายความว่า test นี้จะพังด้วยถ้าการเปลี่ยนแปลงในอนาคตทำ collision loop หรือการตัด excerpt จริงพัง** — ความต่างจาก unit test ข้างบนที่คุ้มค่าสังเกต: assertion ของ integration test เป็นส่วนที่เล็กกว่าและเลือกมาโดยเจตนา (การพลิกการมองเห็นตอน draft→publish) เพราะทุกอย่างอื่นที่มันแตะเป็นของจริงและถูกคลุมด้วย unit test ของมันเองอยู่แล้ว
+
+## Verify
+
+```bash
+cd apps/api
+npm run test
+```
+
+```txt
+ PASS  src/common/slug.service.spec.ts
+ PASS  src/posts/posts.service.spec.ts
+ PASS  src/posts/posts.integration.spec.ts
+
+Test Suites: 3 passed, 3 total
+Tests:       8 passed, 8 total
+Snapshots:   0 total
+Time:        4.821 s
+Ran all test suites.
+```
+
+`posts.integration.spec.ts` เป็น suite เดียวตรงนี้ที่ใช้เวลานานกว่าอีกสอง suite อย่างเห็นได้ชัด — นั่นคือ `mongodb-memory-server` กำลัง start process `mongod` จริงใน `beforeAll` ต้นทุนจริงที่ Pros & cons ได้เอ่ยชื่อไว้ ถ้าเพื่อนร่วมทีมเปลี่ยนตรรกะ draft-guard ของ `PostsService.findPage` โดยไม่อัปเดต spec file ไหนเลย unit test จะพังทันทีและระบุสาขาที่พังชัดเจน แต่ถ้าเขาเปลี่ยน `enum` ของ Mongoose บน `Post.status` จนการกรองพัง มีแต่ integration test เท่านั้นที่จะจับได้ เพราะ `find` ที่ mock ไว้ใน unit test ไม่แตะ schema จริงเลย
+
+## Recap
+
+`SlugService.generateUnique` ได้ unit test ที่เร็วและ isolate เต็มที่ ขับเคลื่อนด้วย fake `exists` predicate พิสูจน์ loop suffix `-2`/`-3` โดยไม่มี Mongoose เข้ามาเกี่ยวข้องเลย `PostsService.findPage` ได้ unit test ที่ mock Mongoose model ผ่าน `getModelToken` พิสูจน์สามสาขาที่ [Refactoring pass](/devblog/th/content-workflow/refactoring-pass/) สร้างไว้: default-เป็น-`PUBLISHED`, ห้าม-`DRAFT`-แบบไม่ระบุตัวตน, และ `DRAFT`-จำกัดตาม author `posts.integration.spec.ts` บูต Mongo จริงแบบใช้แล้วทิ้งผ่าน `mongodb-memory-server` และพิสูจน์สิ่งที่ mock พิสูจน์ไม่ได้: ว่า `create()` persist draft ที่มองไม่เห็นจาก listing สาธารณะได้จริง และ `publish()` พลิกให้มันมองเห็นได้จริง — การแลกแบบเดียวกับ testing pyramid (ความเร็วเทียบกับความแม่นยำ) ที่ประยุกต์ใช้กับ flow draft→publish ของคอร์สนี้เองจาก [Draft → published](/devblog/th/content-workflow/draft-publish/)
+
+ถัดไป: [Frontend tests →](/devblog/th/testing/frontend-tests/)

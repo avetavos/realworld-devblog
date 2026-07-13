@@ -1,0 +1,271 @@
+---
+title: Frontend tests
+description: "Vitest, jsdom, and @testing-library/react unit tests for PostCard and CommentForm, plus a Playwright e2e sketch for reading a post and leaving a comment."
+sidebar:
+  order: 2
+---
+
+## What we're building
+
+`apps/web/vitest.config.ts` and `apps/web/vitest.setup.ts` — Vitest configured with `environment: 'jsdom'` so component tests run without a real browser. `apps/web/components/PostCard.test.tsx` — a render test for [`PostCard`](/devblog/en/frontend-foundations/styling/). `apps/web/components/CommentForm.test.tsx` — an interaction test for [`CommentForm`](/devblog/en/public-blog/post-page/): type into the fields, submit, assert the mocked `gqlFetch` was called with the right arguments, confirm "awaiting moderation" appears. Alongside those, `apps/web/e2e/read-and-comment.spec.ts` — a named Playwright `describe` sketch for the same journey end to end, deliberately not fully built out.
+
+## Why
+
+`PostCard` and `CommentForm` are exactly the kind of components Vitest + jsdom + `@testing-library/react` are built for: pure rendering from props (`PostCard`) and local `useState` plus one outbound call (`CommentForm`), neither of which needs a real browser to verify. jsdom is a JavaScript implementation of the DOM, not an actual rendering engine — there's no real layout, no real paint, and a handful of browser APIs are stubbed or absent — but it's fast enough to run hundreds of component tests in well under a second, and it's all React Testing Library needs to mount a component and query its rendered output the way a user would (`getByRole`, `getByText`, `getByLabelText`).
+
+`CommentForm`'s test mocks `gqlFetch` itself, from `@/lib/graphql`, rather than letting it reach a real network — the same "mock the collaborator, test the class" instinct [Backend tests](/devblog/en/testing/backend-tests/) applied to `PostsService`'s Mongoose model. That keeps the test's assertion precise: it proves `CommentForm` calls `gqlFetch` with the right mutation and the right `{ postId, input }` shape, and that it renders "Thanks — your comment is awaiting moderation." once that call resolves — without needing a running NestJS API, a real Mongo, or a real network round trip at all.
+
+Neither test proves the *real* API accepts what `CommentForm` sends it, though — a mocked `gqlFetch` only proves the component calls its own mock correctly, the same limitation a mocked Mongoose `Model` had on the backend. That's what the Playwright sketch names explicitly: an end-to-end test that drives a real browser against the real running stack (`apps/web`'s dev server talking to a real `apps/api` and a real Mongo) is the only layer that would actually catch `CommentForm`'s `addComment` call drifting out of sync with what `CommentsResolver` from [The comment model](/devblog/en/comments/comment-model/) really expects. This course sketches that test's shape — named, `describe`d, with its steps outlined — without fully building it, the same "name the gap, don't pretend it isn't one" honesty [GraphQL client & auth](/devblog/en/frontend-foundations/graphql-client/) already used for `revalidateTag`.
+
+## Pros & cons
+
+**Vitest + jsdom + React Testing Library (component unit tests) vs. Playwright (browser e2e).** A jsdom-based component test never launches a browser, never starts a dev server, and never touches a network socket — `PostCard.test.tsx` and `CommentForm.test.tsx` together run in a fraction of a second, and a failure isolates to exactly one component with a stack trace pointing at the exact assertion that broke. The cost is real: jsdom doesn't execute real layout or paint, so a CSS bug that only shows up visually is invisible to it, and it can't detect a real integration break, like `CommentForm` sending a field name the actual GraphQL API silently ignores because `gqlFetch` is mocked away entirely. Playwright pays the opposite cost — a real Chromium instance has to launch, a real page has to load against a running `apps/web` (and, for a true end-to-end run, a running `apps/api` and Mongo behind it), so each test costs whole seconds rather than milliseconds — in exchange for being the only layer that proves the actual user journey works: a real click, a real form submission, a real network round trip, a real rendered result. The right split mirrors the backend's testing pyramid exactly: most coverage stays in fast component unit tests, and a small number of Playwright e2e tests are reserved for the handful of journeys — like reading a post and leaving a comment — where "does this actually work, wired together, for a real visitor" is the whole question.
+
+## Set it up
+
+Add the dev dependencies Vitest and Playwright need to `apps/web/package.json`:
+
+```json
+{
+  "devDependencies": {
+    "vitest": "^3.0.0",
+    "@vitejs/plugin-react": "^4.3.0",
+    "jsdom": "^25.0.0",
+    "@testing-library/react": "^16.0.0",
+    "@testing-library/jest-dom": "^6.5.0",
+    "@testing-library/user-event": "^14.5.0",
+    "@playwright/test": "^1.48.0"
+  }
+}
+```
+
+Create `apps/web/vitest.config.ts`:
+
+```ts
+import { defineConfig } from 'vitest/config';
+import react from '@vitejs/plugin-react';
+
+export default defineConfig({
+  plugins: [react()],
+  test: {
+    environment: 'jsdom',
+    setupFiles: ['./vitest.setup.ts'],
+  },
+  resolve: {
+    alias: {
+      '@': new URL('./', import.meta.url).pathname,
+    },
+  },
+});
+```
+
+Create `apps/web/vitest.setup.ts`:
+
+```ts
+import '@testing-library/jest-dom/vitest';
+import { cleanup } from '@testing-library/react';
+import { afterEach } from 'vitest';
+
+afterEach(() => {
+  cleanup();
+});
+```
+
+- **`environment: 'jsdom'`** is the one option that makes `render()` from `@testing-library/react` possible at all — Vitest's default `node` environment has no `document`/`window` for a component to mount into.
+- **`resolve.alias['@']`** mirrors the `@/*` path mapping `apps/web/tsconfig.json` already declares for Next.js itself — every `import ... from '@/lib/graphql'` in `CommentForm.tsx`/`PostCard.tsx` needs Vitest, a separate build tool from Next's own bundler, to resolve that alias the same way.
+- **`@testing-library/jest-dom/vitest`**, not the bare `@testing-library/jest-dom` import — this is the Vitest-specific entry point that registers matchers like `.toBeInTheDocument()`/`.toHaveTextContent()` against Vitest's own `expect`, not Jest's.
+- **`cleanup()` in `afterEach`** unmounts whatever the previous test rendered into jsdom's shared document, so one test's leftover DOM can never leak into the next test's queries.
+
+Create `apps/web/components/PostCard.test.tsx`:
+
+```tsx
+import { render, screen } from '@testing-library/react';
+import { describe, expect, it, vi } from 'vitest';
+import { PostCard } from './PostCard';
+import type { Post } from '@/lib/graphql';
+
+vi.mock('next/link', () => ({
+  default: ({
+    href,
+    children,
+    className,
+  }: {
+    href: string;
+    children: React.ReactNode;
+    className?: string;
+  }) => (
+    <a href={href} className={className}>
+      {children}
+    </a>
+  ),
+}));
+
+type CardPost = Pick<Post, 'title' | 'slug' | 'excerpt' | 'coverImage' | 'tags' | 'publishedAt'>;
+
+const basePost: CardPost = {
+  title: 'Hello, DevBlog',
+  slug: 'hello-devblog',
+  excerpt: 'This is the first post.',
+  coverImage: undefined,
+  tags: ['nestjs', 'graphql'],
+  publishedAt: '2026-01-01T00:00:00.000Z',
+};
+
+describe('PostCard', () => {
+  it('renders the title, excerpt, tags, and a link to the post', () => {
+    render(<PostCard post={basePost} />);
+
+    expect(screen.getByRole('heading', { name: 'Hello, DevBlog' })).toBeInTheDocument();
+    expect(screen.getByText('This is the first post.')).toBeInTheDocument();
+    expect(screen.getByText('nestjs, graphql')).toBeInTheDocument();
+    expect(screen.getByRole('link')).toHaveAttribute('href', '/posts/hello-devblog');
+  });
+
+  it('omits the excerpt and the cover image when neither is set', () => {
+    const post: CardPost = { ...basePost, excerpt: undefined, coverImage: undefined };
+
+    render(<PostCard post={post} />);
+
+    expect(screen.queryByText('This is the first post.')).not.toBeInTheDocument();
+    expect(screen.queryByRole('img')).not.toBeInTheDocument();
+  });
+});
+```
+
+- **`vi.mock('next/link', ...)`** replaces Next's `Link` with a plain `<a>` for the duration of this file — `PostCard` only ever needs `Link` to render an anchor with an `href`, so the mock keeps the test independent of Next's own router context instead of asserting anything about Next's internals.
+- **`screen.queryByText`/`queryByRole`, not `getByText`/`getByRole`, in the second test** — `query*` returns `null` for a missing element instead of throwing, which is exactly what asserting an element's *absence* needs; `get*` would fail the test with an unhelpful "unable to find element" error before the `not.toBeInTheDocument()` assertion ever ran.
+
+Create `apps/web/components/CommentForm.test.tsx`:
+
+```tsx
+import { render, screen, waitFor } from '@testing-library/react';
+import userEvent from '@testing-library/user-event';
+import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { CommentForm } from './CommentForm';
+import { gqlFetch } from '@/lib/graphql';
+
+vi.mock('@/lib/graphql', () => ({
+  gqlFetch: vi.fn(),
+}));
+
+const mockedGqlFetch = vi.mocked(gqlFetch);
+
+describe('CommentForm', () => {
+  beforeEach(() => {
+    mockedGqlFetch.mockReset();
+  });
+
+  it('submits the form through gqlFetch and shows the awaiting-moderation message', async () => {
+    mockedGqlFetch.mockResolvedValue({
+      addComment: {
+        id: 'c1',
+        authorName: 'Alex',
+        body: 'Great post, thanks for writing this up!',
+        createdAt: '2026-01-01T00:00:00.000Z',
+      },
+    });
+
+    const user = userEvent.setup();
+    render(<CommentForm postId="post-1" />);
+
+    await user.type(screen.getByLabelText('Name'), 'Alex');
+    await user.type(screen.getByLabelText('Email'), 'alex@example.com');
+    await user.type(screen.getByLabelText('Comment'), 'Great post, thanks for writing this up!');
+    await user.click(screen.getByRole('button', { name: /submit comment/i }));
+
+    await waitFor(() => {
+      expect(mockedGqlFetch).toHaveBeenCalledTimes(1);
+    });
+    expect(mockedGqlFetch).toHaveBeenCalledWith(expect.stringContaining('mutation AddComment'), {
+      postId: 'post-1',
+      input: {
+        authorName: 'Alex',
+        authorEmail: 'alex@example.com',
+        body: 'Great post, thanks for writing this up!',
+      },
+    });
+    expect(
+      await screen.findByText('Thanks — your comment is awaiting moderation.'),
+    ).toBeInTheDocument();
+  });
+
+  it('shows the GraphQL error message and keeps the form visible when gqlFetch rejects', async () => {
+    mockedGqlFetch.mockRejectedValue(new Error('Cannot comment on a post that is not published'));
+
+    const user = userEvent.setup();
+    render(<CommentForm postId="post-1" />);
+
+    await user.type(screen.getByLabelText('Name'), 'Alex');
+    await user.type(screen.getByLabelText('Email'), 'alex@example.com');
+    await user.type(screen.getByLabelText('Comment'), 'First!');
+    await user.click(screen.getByRole('button', { name: /submit comment/i }));
+
+    expect(await screen.findByRole('alert')).toHaveTextContent(
+      'Cannot comment on a post that is not published',
+    );
+    expect(screen.getByRole('button', { name: /submit comment/i })).toBeInTheDocument();
+  });
+});
+```
+
+- **`vi.mock('@/lib/graphql', ...)` + `vi.mocked(gqlFetch)`** replaces the real `gqlFetch` with a `vi.fn()` for this whole file, and `vi.mocked()` gives the mock back a properly-typed handle (`.mockResolvedValue`/`.mockRejectedValue`) instead of casting it by hand.
+- **`getByLabelText('Name')` finds the `<input>` nested inside `<label>Name<input ... /></label>`** — Testing Library resolves that implicit label association the same way a screen reader would, with no `htmlFor`/`id` pair needed, since `CommentForm.tsx` never added one.
+- **`await waitFor(() => expect(mockedGqlFetch).toHaveBeenCalledTimes(1))`** — `handleSubmit` is `async`; without waiting, the assertion could run before the awaited `gqlFetch` call has actually happened.
+- **The exact success string, `'Thanks — your comment is awaiting moderation.'`**, is asserted byte-for-byte against `CommentForm.tsx`'s own JSX from [Post page](/devblog/en/public-blog/post-page/) — a test this specific would catch a copy change to that message as a real, visible diff, not silently pass regardless of wording.
+- **The second test proves the `catch` branch**, not just the happy path — `err instanceof Error ? err.message : '...'` in `CommentForm.tsx` means a rejected `gqlFetch` call surfaces its real message through `role="alert"`, and the form stays mounted (`submitted` never becomes `true`) so a caller can fix the input and retry.
+
+Create `apps/web/e2e/read-and-comment.spec.ts` — a sketch, not a finished test:
+
+```ts
+import { test, expect } from '@playwright/test';
+
+test.describe('reading a post and leaving a comment', () => {
+  test('a visitor can open a published post and submit a comment', async ({ page }) => {
+    // 1. Visit the home list and open the first published post.
+    await page.goto('/');
+    await page.getByRole('link').first().click();
+
+    // 2. Fill in and submit the comment form.
+    // await page.getByLabel('Name').fill('Alex');
+    // await page.getByLabel('Email').fill('alex@example.com');
+    // await page.getByLabel('Comment').fill('Great post, thanks for writing this up!');
+    // await page.getByRole('button', { name: 'Submit comment' }).click();
+
+    // 3. Assert the "awaiting moderation" message replaces the form.
+    // await expect(page.getByText('Thanks — your comment is awaiting moderation.')).toBeVisible();
+
+    // TODO: needs a real apps/api + at least one published, seeded post before
+    // this can run for real — see Docker & Compose for standing up the whole
+    // stack this e2e test would run against.
+  });
+});
+```
+
+- **`test.describe`/`test` are named exactly like the journey they represent** — "reading a post and leaving a comment" — even though step 2 and 3's bodies are commented out. Naming the test before it's runnable is deliberate: the name is what a CI dashboard or a teammate skimming this file sees first, and it should describe the real user journey regardless of how much of the implementation exists yet.
+- **This sketch depends on infrastructure this module doesn't stand up** — a real `apps/api`, a real Mongo, and at least one published post already seeded. [Docker & Compose](/devblog/en/docker/) is where the whole stack becomes a single `docker compose up`, which is what would make this test runnable rather than aspirational.
+- **Playwright's own `page.goto`/`getByRole`/`getByLabel` API is intentionally the same shape as React Testing Library's queries** — a reader who's comfortable with `CommentForm.test.tsx` above is already most of the way to reading real Playwright code, which is exactly why this sketch is worth including even unfinished.
+
+## Verify
+
+```bash
+cd apps/web
+npm run test
+```
+
+```txt
+ ✓ components/PostCard.test.tsx (2 tests) 15ms
+ ✓ components/CommentForm.test.tsx (2 tests) 120ms
+
+ Test Files  2 passed (2)
+      Tests  4 passed (4)
+   Start at  10:15:00
+   Duration  850ms
+```
+
+`read-and-comment.spec.ts` doesn't run here at all — Vitest's `include` pattern only picks up `.test.tsx` files, and Playwright tests run through their own `npx playwright test` command against a running app, not through `npm run test`. That separation is deliberate: a component unit test suite should stay fast enough to run on every save, and an e2e suite that needs a whole running stack shouldn't block that feedback loop.
+
+## Recap
+
+`PostCard.test.tsx` and `CommentForm.test.tsx` run entirely in jsdom, with `gqlFetch` mocked out of `CommentForm` the same way `PostsService`'s Mongoose model was mocked on the backend — fast, isolated, and precise about which component broke when a test fails. `vitest.config.ts`'s `environment: 'jsdom'` plus `@testing-library/jest-dom/vitest` in `vitest.setup.ts` is the whole setup that makes `render()`/`screen`/`.toBeInTheDocument()` available. `read-and-comment.spec.ts` names the one thing no mocked unit test can prove — that the real, wired-together app actually works for a real visitor — as a Playwright sketch, honestly left unfinished until [Docker & Compose](/devblog/en/docker/) stands up the stack it needs to run against. The same testing-pyramid trade-off [Backend tests](/devblog/en/testing/backend-tests/) named — speed and isolation at the base, fidelity and confidence at the top — applies to the frontend exactly as it did to the API.
+
+Next: [Docker & Compose →](/devblog/en/docker/)

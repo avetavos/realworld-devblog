@@ -1,0 +1,310 @@
+---
+title: Backend tests
+description: "Jest unit tests for SlugService and PostsService with mocked dependencies, plus a mongodb-memory-server integration test that proves the draft→published flow against a real, ephemeral Mongo."
+sidebar:
+  order: 1
+---
+
+## What we're building
+
+`apps/api/src/common/slug.service.spec.ts` — a `@nestjs/testing` unit test of `SlugService.generateUnique` from [Slugs & validation](/devblog/en/content-workflow/slugs-validation/), driven by a fake `exists` predicate to prove the `-2`/`-3` suffixing loop. `apps/api/src/posts/posts.service.spec.ts` — a unit test of `PostsService.findPage` from [Refactoring pass](/devblog/en/content-workflow/refactoring-pass/), with the Mongoose model mocked out through `getModelToken`. Then a small `apps/api/src/testing/mongo-memory.setup.ts` helper wrapping `mongodb-memory-server`, and `apps/api/src/posts/posts.integration.spec.ts` — an integration test that boots a real, throwaway `mongod`, then asserts the whole draft→publish flow: `create` a draft, confirm it's absent from the public `findPage({ status: PUBLISHED })`, `publish` it, confirm it's now present.
+
+## Why
+
+The **testing pyramid** is a shape, not just a slogan: many fast unit tests at the base, fewer integration tests in the middle, and a small number of end-to-end tests at the top.
+
+```txt
+        /\
+       /e2e\        few — whole app, real network, slowest, highest confidence
+      /------\
+     /integr. \     some — one real boundary (a real Mongo), one flow at a time
+    /----------\
+   /    unit    \   many — one class, every dependency mocked, milliseconds each
+  /--------------\
+```
+
+Each layer earns its place by trading speed for fidelity. `SlugService.generateUnique` has zero Mongoose in it — it's a pure loop around a caller-supplied predicate — so a unit test that hands it a fake `exists` function and asserts the suffix sequence runs in milliseconds and fails for exactly one reason if it ever breaks. `PostsService.findPage` has real branching logic worth testing on its own too (default to `PUBLISHED`, forbid an anonymous `DRAFT` request, scope a non-admin's `DRAFT` request to their own posts) — mocking `postModel.find`/`countDocuments` isolates that branching from Mongo entirely, so the test proves the *filter object* `findPage` builds, not whether Mongo would actually honor it.
+
+That last point is exactly where mocking a model stops being enough. A mocked `Model` only proves `PostsService` called `find` with the arguments the test expected — it can't catch a real schema-level bug (a missing `unique: true` on `slug`, a wrong `enum` value, `$ne` behaving differently than assumed), and it can't prove the *data* that actually comes back matches what was written, because there's no real document store behind it. `mongodb-memory-server` closes that gap: it downloads and boots a real, ephemeral `mongod` process the first time it runs, then a test connects `MongooseModule.forRoot()` at that instance's URI exactly the way `apps/api` connects to a real deployment. A **repository-style test** — one whose whole point is "does the thing I persisted come back the way I expect" — gets genuine confidence from that: `create()` really writes a document with Mongoose's real casting and validators, `findPage({ status: PUBLISHED })` really filters through a real query engine, and the test would catch a change to `Post.status`'s `enum` or a broken index the same way production Mongo would.
+
+## Pros & cons
+
+**Mocked `Model` via `getModelToken` (unit) vs. `mongodb-memory-server` (integration).** A mocked model costs nothing to boot — no binary download, no process startup — so a suite built entirely on mocks stays in the tens-of-milliseconds range even with hundreds of tests, and a failure always isolates to the one class under test, since every collaborator is a `jest.fn()` whose behavior the test itself controls. The cost is exactly the fidelity gap above: a mock can drift from what Mongoose actually does, silently, and nothing catches that drift until a real environment does. `mongodb-memory-server` pays a real cost per test file — a few hundred milliseconds to a couple of seconds to start `mongod` the first time — in exchange for exercising the actual persistence path: real schema validation, real unique-index enforcement, real query filtering. The right split isn't "pick one" — it's most of the suite staying unit (fast, isolated, one branch of logic at a time) with a handful of integration tests reserved for the flows where "did this actually persist correctly" is the whole question, like draft→publish here.
+
+## Set it up
+
+Install `mongodb-memory-server` as a dev dependency in the devblog API project:
+
+```bash
+cd apps/api
+npm install --save-dev mongodb-memory-server
+```
+
+`package.json`'s `devDependencies` now includes it alongside what `nest new` already scaffolded:
+
+```json
+{
+  "devDependencies": {
+    "@nestjs/testing": "^10.0.0",
+    "jest": "^29.5.0",
+    "mongodb-memory-server": "^9.1.6",
+    "ts-jest": "^29.1.0"
+  }
+}
+```
+
+Create `apps/api/src/common/slug.service.spec.ts`:
+
+```ts
+import { Test } from '@nestjs/testing';
+import { SlugService } from './slug.service';
+
+describe('SlugService', () => {
+  let slugService: SlugService;
+
+  beforeEach(async () => {
+    const moduleRef = await Test.createTestingModule({
+      providers: [SlugService],
+    }).compile();
+
+    slugService = moduleRef.get(SlugService);
+  });
+
+  it('returns the plain slug when nothing collides', async () => {
+    const exists = jest.fn().mockResolvedValue(false);
+
+    const slug = await slugService.generateUnique('Hello, DevBlog', exists);
+
+    expect(slug).toBe('hello-devblog');
+    expect(exists).toHaveBeenCalledTimes(1);
+    expect(exists).toHaveBeenCalledWith('hello-devblog');
+  });
+
+  it('appends -2 when the base slug is already taken once', async () => {
+    const exists = jest
+      .fn()
+      .mockResolvedValueOnce(true) // 'hello-devblog' is taken
+      .mockResolvedValueOnce(false); // 'hello-devblog-2' is free
+
+    const slug = await slugService.generateUnique('Hello, DevBlog', exists);
+
+    expect(slug).toBe('hello-devblog-2');
+    expect(exists).toHaveBeenCalledTimes(2);
+  });
+
+  it('keeps incrementing the suffix until a free candidate is found', async () => {
+    const exists = jest
+      .fn()
+      .mockResolvedValueOnce(true) // 'hello-devblog'
+      .mockResolvedValueOnce(true) // 'hello-devblog-2'
+      .mockResolvedValueOnce(false); // 'hello-devblog-3' is free
+
+    const slug = await slugService.generateUnique('Hello, DevBlog', exists);
+
+    expect(slug).toBe('hello-devblog-3');
+    expect(exists).toHaveBeenCalledTimes(3);
+  });
+});
+```
+
+Create `apps/api/src/posts/posts.service.spec.ts`:
+
+```ts
+import { Test } from '@nestjs/testing';
+import { getModelToken } from '@nestjs/mongoose';
+import { ForbiddenException } from '@nestjs/common';
+import { PostsService } from './posts.service';
+import { Post } from './schemas/post.schema';
+import { PostStatus } from './enums/post-status.enum';
+import { SlugService } from '../common/slug.service';
+import { ExcerptService } from '../common/excerpt.service';
+
+describe('PostsService.findPage', () => {
+  let postsService: PostsService;
+  let postModel: { find: jest.Mock; countDocuments: jest.Mock };
+
+  const fakeItems = [{ id: '1', title: 'A post' }];
+
+  beforeEach(async () => {
+    const findChain = {
+      sort: jest.fn().mockReturnThis(),
+      skip: jest.fn().mockReturnThis(),
+      limit: jest.fn().mockReturnThis(),
+      exec: jest.fn().mockResolvedValue(fakeItems),
+    };
+
+    postModel = {
+      find: jest.fn().mockReturnValue(findChain),
+      countDocuments: jest.fn().mockReturnValue({
+        exec: jest.fn().mockResolvedValue(fakeItems.length),
+      }),
+    };
+
+    const moduleRef = await Test.createTestingModule({
+      providers: [
+        PostsService,
+        { provide: getModelToken(Post.name), useValue: postModel },
+        { provide: SlugService, useValue: { generateUnique: jest.fn() } },
+        { provide: ExcerptService, useValue: { derive: jest.fn() } },
+      ],
+    }).compile();
+
+    postsService = moduleRef.get(PostsService);
+  });
+
+  it('defaults to status: PUBLISHED when no options are given', async () => {
+    const result = await postsService.findPage();
+
+    expect(postModel.find).toHaveBeenCalledWith({ status: PostStatus.PUBLISHED });
+    expect(result.items).toEqual(fakeItems);
+    expect(result.total).toBe(1);
+  });
+
+  it('throws ForbiddenException for status: DRAFT with no requesting user', async () => {
+    await expect(postsService.findPage({ status: PostStatus.DRAFT })).rejects.toBeInstanceOf(
+      ForbiddenException,
+    );
+    expect(postModel.find).not.toHaveBeenCalled();
+  });
+
+  it("scopes status: DRAFT to the caller's own posts when the requester is not an admin", async () => {
+    await postsService.findPage({
+      status: PostStatus.DRAFT,
+      requestingUser: { userId: 'author-1', email: 'a@example.com', role: 'author' },
+    });
+
+    expect(postModel.find).toHaveBeenCalledWith({
+      status: PostStatus.DRAFT,
+      author: 'author-1',
+    });
+  });
+});
+```
+
+- **`getModelToken(Post.name)` + `useValue`** is the documented `@nestjs/testing` pattern for standing in for `@InjectModel(Post.name)` — `PostsService`'s constructor never knows the difference between this plain object and a real Mongoose `Model`.
+- **`SlugService`/`ExcerptService` are mocked too, even though `findPage` never calls them** — `PostsService`'s constructor requires all three collaborators to resolve before `Test.createTestingModule(...).compile()` succeeds; a trivial `{ generateUnique: jest.fn() }` satisfies the DI container without pulling in any of `SlugService`'s own logic.
+- **The three tests mirror `findPage`'s three real branches** from [Refactoring pass](/devblog/en/content-workflow/refactoring-pass/): no `status` defaults to `PUBLISHED`; `DRAFT` with no `requestingUser` throws before ever touching `postModel`; `DRAFT` from a non-admin adds `author` to the filter. A fourth branch — an admin requesting `DRAFT` sees every author's drafts — is left as a reader exercise, following the same shape as the third test with `role: 'admin'` and no `author` key expected in the filter.
+
+Create `apps/api/src/testing/mongo-memory.setup.ts` — the shared setup helper the integration test below imports:
+
+```ts
+import { MongoMemoryServer } from 'mongodb-memory-server';
+
+let mongod: MongoMemoryServer | null = null;
+
+export async function startInMemoryMongo(): Promise<string> {
+  mongod = await MongoMemoryServer.create();
+  return mongod.getUri();
+}
+
+export async function stopInMemoryMongo(): Promise<void> {
+  if (mongod) {
+    await mongod.stop();
+    mongod = null;
+  }
+}
+```
+
+Create `apps/api/src/posts/posts.integration.spec.ts`:
+
+```ts
+import { Test, TestingModule } from '@nestjs/testing';
+import { MongooseModule, getModelToken } from '@nestjs/mongoose';
+import { Model, Types } from 'mongoose';
+import { PostsService } from './posts.service';
+import { Post, PostDocument, PostSchema } from './schemas/post.schema';
+import { PostStatus } from './enums/post-status.enum';
+import { SlugService } from '../common/slug.service';
+import { ExcerptService } from '../common/excerpt.service';
+import { startInMemoryMongo, stopInMemoryMongo } from '../testing/mongo-memory.setup';
+
+describe('PostsService (integration, mongodb-memory-server)', () => {
+  let moduleRef: TestingModule;
+  let postsService: PostsService;
+
+  beforeAll(async () => {
+    const uri = await startInMemoryMongo();
+
+    moduleRef = await Test.createTestingModule({
+      imports: [
+        MongooseModule.forRoot(uri),
+        MongooseModule.forFeature([{ name: Post.name, schema: PostSchema }]),
+      ],
+      providers: [PostsService, SlugService, ExcerptService],
+    }).compile();
+
+    postsService = moduleRef.get(PostsService);
+  });
+
+  afterEach(async () => {
+    const postModel = moduleRef.get<Model<PostDocument>>(getModelToken(Post.name));
+    await postModel.deleteMany({});
+  });
+
+  afterAll(async () => {
+    await moduleRef.close();
+    await stopInMemoryMongo();
+  });
+
+  it('keeps a new draft out of the public findPage({ status: PUBLISHED }) result', async () => {
+    const authorId = new Types.ObjectId().toString();
+
+    const draft = await postsService.create(authorId, {
+      title: 'Hello, DevBlog',
+      body: 'This is the first post.',
+    });
+    expect(draft.status).toBe(PostStatus.DRAFT);
+
+    const beforePublish = await postsService.findPage({ status: PostStatus.PUBLISHED });
+    expect(beforePublish.total).toBe(0);
+    expect(beforePublish.items).toHaveLength(0);
+  });
+
+  it('surfaces the post in findPage({ status: PUBLISHED }) once it has been published', async () => {
+    const authorId = new Types.ObjectId().toString();
+    const draft = await postsService.create(authorId, {
+      title: 'Hello, DevBlog',
+      body: 'This is the first post.',
+    });
+
+    await postsService.publish(draft.id);
+
+    const afterPublish = await postsService.findPage({ status: PostStatus.PUBLISHED });
+    expect(afterPublish.total).toBe(1);
+    expect(afterPublish.items[0].slug).toBe('hello-devblog');
+    expect(afterPublish.items[0].publishedAt).toBeInstanceOf(Date);
+  });
+});
+```
+
+- **`MongooseModule.forRoot(uri)`, not a manual `mongoose.connect()`** — pointing Nest's own Mongoose integration at the memory server's URI means `MongooseModule.forFeature` behaves exactly the way it does against a real deployment, and `moduleRef.close()` below tears the connection down through the same lifecycle hooks `apps/api`'s real bootstrap relies on.
+- **`SlugService`/`ExcerptService` are real instances here, not mocks** — unlike the unit test above, this test's whole point is proving `create()`'s real behavior end to end, which includes the real slug it produces (`hello-devblog`, matching [Slugs & validation](/devblog/en/content-workflow/slugs-validation/)'s own Verify output).
+- **`afterEach` clears `postModel`, `afterAll` tears the module and the server down** — each test starts from an empty collection without paying to boot a fresh `mongod` per test, and `moduleRef.close()` runs before `stopInMemoryMongo()` so the Mongoose connection closes cleanly before the underlying process stops.
+- **No `SlugService`/`ExcerptService` mocking here means this test would also fail if a later change broke the real collision loop or excerpt truncation** — a difference from the unit test above worth noticing: the integration test's assertions are a smaller, deliberately-chosen slice (the draft→publish visibility flip) precisely because everything else it touches is real and already covered by its own unit tests.
+
+## Verify
+
+```bash
+cd apps/api
+npm run test
+```
+
+```txt
+ PASS  src/common/slug.service.spec.ts
+ PASS  src/posts/posts.service.spec.ts
+ PASS  src/posts/posts.integration.spec.ts
+
+Test Suites: 3 passed, 3 total
+Tests:       8 passed, 8 total
+Snapshots:   0 total
+Time:        4.821 s
+Ran all test suites.
+```
+
+`posts.integration.spec.ts` is the one suite here that takes noticeably longer than the other two — that's `mongodb-memory-server` actually starting a `mongod` process in `beforeAll`, the real cost the Pros & cons section named. If a teammate changes `PostsService.findPage`'s draft-guard logic without updating either spec file, the unit test fails immediately and names the exact broken branch; if they instead change `Post.status`'s Mongoose `enum` in a way that breaks filtering, only the integration test would catch it, since the unit test's mocked `find` never touches a real schema at all.
+
+## Recap
+
+`SlugService.generateUnique` gets a fast, fully-isolated unit test driven by a fake `exists` predicate, proving the `-2`/`-3` suffix loop with zero Mongoose involved. `PostsService.findPage` gets a unit test with its Mongoose model mocked through `getModelToken`, proving the three branches [Refactoring pass](/devblog/en/content-workflow/refactoring-pass/) built: default-to-`PUBLISHED`, forbidden-anonymous-`DRAFT`, and author-scoped-`DRAFT`. `posts.integration.spec.ts` boots a real, throwaway Mongo through `mongodb-memory-server` and proves the thing a mock can't: that `create()` really persists a draft invisible to the public listing, and `publish()` really flips it visible — the same testing-pyramid trade-off (speed vs. fidelity) applied to this course's own draft→publish flow from [Draft → published](/devblog/en/content-workflow/draft-publish/).
+
+Next: [Frontend tests →](/devblog/en/testing/frontend-tests/)
