@@ -1,0 +1,138 @@
+---
+title: API collection (curl & Postman)
+description: ทดสอบ DevBlog GraphQL API ทั้งหมดด้วยมือ — สคริปต์ smoke test ด้วย curl แบบคำสั่งเดียว และ Postman collection ที่ import ได้ซึ่งเชื่อม auth, post และ comment ให้อัตโนมัติ
+sidebar:
+  order: 3
+---
+
+## What we're building
+
+สองวิธีพร้อมใช้สำหรับขับ GraphQL API โดยไม่ต้องผ่านฝั่ง front end: **สคริปต์ smoke test ด้วย curl** ที่ไล่ทั้ง lifecycle ของคอนเทนต์ในคำสั่งเดียว และ **Postman collection** ที่ import ได้ ซึ่งจับ JWT และ ID ของ post/comment ให้คุณเอง ทั้งคู่ยิงไปที่ GraphQL endpoint เดียวคือ `http://localhost:4000/graphql` ดังนั้นต้องรันสแตกขึ้นมาก่อน:
+
+```bash
+docker compose up --build
+```
+
+ทั้งสองไฟล์ดาวน์โหลดได้จากเว็บนี้:
+
+- **สคริปต์ curl:** [`devblog-smoke.sh`](/devblog/devblog-smoke.sh)
+- **Postman collection:** [`devblog.postman_collection.json`](/devblog/devblog.postman_collection.json)
+
+## Why
+
+เทสต์อัตโนมัติจากบทเรียนก่อนหน้าพิสูจน์ว่าโค้ดถูกต้องแบบแยกส่วน แต่บทนี้ต่างออกไป: มันคือการ **ทดสอบแบบ black-box end-to-end** กับเซิร์ฟเวอร์ที่รันจริง — เป็นวิธีที่เร็วที่สุดในการเช็กว่า `docker compose up` ที่เพิ่งขึ้นมาทำงานถูกต้อง, reproduce บั๊ก หรือเดโม API GraphQL มี endpoint เดียวและมี schema ที่อธิบายตัวเองได้ (Apollo Sandbox ที่ `/graphql` เหมาะกับงานนี้) แต่ collection ที่บันทึกไว้และ smoke test ที่รันด้วยสคริปต์ได้ คือสิ่งที่คุณหยิบมาใช้ตอน onboard คนใหม่หรือต่อ check เข้ากับ CI
+
+## Pros & cons
+
+- **สคริปต์ curl** — ไม่ต้องมีเครื่องมืออื่นนอกจาก `curl` + `jq`, อยู่ใน version control, รันใน CI ได้, diff ง่าย การสร้าง body ของ GraphQL ด้วยมือค่อนข้างยุ่ง สคริปต์เลยใช้ `jq` ประกอบ `{query, variables}` อย่างปลอดภัย เป็นเส้นตรง ไม่ interactive
+- **Postman** — ใช้ **GraphQL body mode** ของ Postman โดยตรง (มีช่อง query และ variables พร้อม autocomplete จาก schema), มีประวัติที่บันทึกไว้, และปรับทีละ request ได้; test script ใน collection จะจับ `token`/`post_id`/`post_slug`/`comment_id` ให้อัตโนมัติเพื่อให้ request เชื่อมกัน แต่มันเป็น GUI และ collection JSON ก็ยาวเวลาจะแก้ด้วยมือ
+
+## The curl smoke test
+
+เซฟไฟล์นี้เป็น `devblog-smoke.sh` (หรือดาวน์โหลดด้านบน) แล้วรัน `bash devblog-smoke.sh` มันจะ register ผู้เขียนใหม่ทุกครั้งที่รัน, สร้าง tag, สร้างและ publish post, ลิสต์ post ที่เผยแพร่แล้ว, เพิ่ม comment (ซึ่งเริ่มเป็นสถานะ *pending*) แล้วอ่าน post กลับมา
+
+```bash
+#!/usr/bin/env bash
+# DevBlog GraphQL API smoke test — drives the whole content lifecycle with curl + jq.
+set -euo pipefail
+
+API="${API:-http://localhost:4000/graphql}"
+EMAIL="author+$(date +%s)@devblog.dev"   # unique each run
+PASSWORD="correct-horse"
+TOKEN=""
+
+say() { printf '\n\033[1;32m▶ %s\033[0m\n' "$1"; }
+
+# gql <query> <variables-json> → prints the `data` object (fails loudly on GraphQL errors)
+gql() {
+  local body resp
+  body=$(jq -n --arg q "$1" --argjson v "${2:-{}}" '{query:$q, variables:$v}')
+  resp=$(curl -s -X POST "$API" -H 'Content-Type: application/json' \
+    ${TOKEN:+-H "Authorization: Bearer $TOKEN"} -d "$body")
+  if echo "$resp" | jq -e '.errors' >/dev/null 2>&1; then
+    echo "GraphQL error:" >&2; echo "$resp" | jq '.errors' >&2; exit 1
+  fi
+  echo "$resp" | jq '.data'
+}
+
+say "Register ($EMAIL)"
+TOKEN=$(gql 'mutation($input: RegisterInput!){ register(input:$input){ token user{ id displayName role } } }' \
+  "$(jq -n --arg e "$EMAIL" --arg p "$PASSWORD" '{input:{email:$e,password:$p,displayName:"Ava Author"}}')" \
+  | jq -r '.register.token')
+[ -n "$TOKEN" ] && [ "$TOKEN" != "null" ] || { echo "register failed"; exit 1; }
+echo "token: ${TOKEN:0:24}…"
+
+say "Create a tag"
+gql 'mutation($name:String!){ createTag(name:$name){ id name slug } }' '{"name":"NestJS"}' | jq -c '.createTag'
+
+say "Create a draft post"
+CREATE=$(gql 'mutation($input: CreatePostInput!){ createPost(input:$input){ id slug status } }' \
+  '{"input":{"title":"Hello, DevBlog","body":"This is the **first** post.","tags":["nestjs","graphql"]}}')
+POST_ID=$(echo "$CREATE" | jq -r '.createPost.id')
+POST_SLUG=$(echo "$CREATE" | jq -r '.createPost.slug')
+echo "$CREATE" | jq -c '.createPost'
+
+say "Publish it"
+gql 'mutation($id: ID!){ publishPost(id:$id){ id status publishedAt } }' \
+  "$(jq -n --arg id "$POST_ID" '{id:$id}')" | jq -c '.publishPost'
+
+say "Public posts (published only)"
+gql 'query{ posts(status: PUBLISHED){ total items{ title slug status } } }' | jq -c '.posts'
+
+say "Add a comment (starts as pending)"
+gql 'mutation($postId: ID!, $input: AddCommentInput!){ addComment(postId:$postId, input:$input){ id authorName status } }' \
+  "$(jq -n --arg id "$POST_ID" '{postId:$id, input:{authorName:"Alex",authorEmail:"alex@example.com",body:"Great post!"}}')" \
+  | jq -c '.addComment'
+
+say "Read the post by slug (approved comments only — pending one is hidden)"
+gql 'query($slug:String!){ post(slug:$slug){ title author{ displayName } comments{ authorName body status } } }' \
+  "$(jq -n --arg s "$POST_SLUG" '{slug:$s}')" | jq '.post'
+
+say "Done ✅  (post $POST_SLUG)"
+echo "Note: approving the comment needs an ADMIN user (moderateComment is @Roles('admin'))."
+echo "      Promote your user in mongosh — see the Docker module's compose-full lesson."
+```
+
+## The Postman collection
+
+ดาวน์โหลด [`devblog.postman_collection.json`](/devblog/devblog.postman_collection.json) แล้วใน Postman: **Import** → ลากไฟล์ลงไป คุณจะได้สี่โฟลเดอร์ — **Auth · Tags · Posts · Comments** — พร้อมกับ collection variable เหล่านี้:
+
+| Variable | หน้าที่ |
+|----------|---------|
+| `base_url` | `http://localhost:4000/graphql` (GraphQL endpoint เดียว) |
+| `email` / `password` | credential สำหรับเดโม |
+| `token` | ตั้งค่าอัตโนมัติโดย **Register** / **Login** |
+| `post_id` / `post_slug` | ตั้งค่าอัตโนมัติโดย **Create post** |
+| `comment_id` | ตั้งค่าอัตโนมัติโดย **Add comment** |
+
+ทุก request เป็น `POST` ไปที่ `{{base_url}}` โดยใช้ **GraphQL body mode** ของ Postman (มีช่อง query และ variables) Collection ใช้ auth แบบ **Bearer `{{token}}`** ที่ระดับ collection ส่วน operation สาธารณะ (Register, Login, Posts, Post by slug, Add comment, List tags) ตั้งเป็น *No Auth* การจับค่าเป็น test script สั้น ๆ เช่นบน **Create post**:
+
+```js
+const p = pm.response.json().data && pm.response.json().data.createPost;
+if (p) { pm.collectionVariables.set('post_id', p.id); pm.collectionVariables.set('post_slug', p.slug); }
+```
+
+flow จึงเชื่อมกัน: รัน **Auth → Register** (หรือ **Login**), จากนั้น **Tags → Create tag**, **Posts → Create post → Publish post → Posts (published) → Post by slug**, และ **Comments → Add comment** — ทุก `{{...}}` จะถูกเติมให้เรียบร้อย
+
+request ที่เป็น **admin เท่านั้น** (Pending comments, Moderate comment, Delete post) จะคืน GraphQL error แบบ `Forbidden` ถ้าใช้บัญชี author ปกติ ให้เลื่อนผู้ใช้ของคุณเป็น `admin` ใน mongosh (บทเรียน `compose-full` ของโมดูล Docker แสดง `updateOne` ไว้), ล็อกอินใหม่เพื่อรีเฟรช token แล้วมันจะทำงาน
+
+## Verify
+
+เมื่อสแตกรันอยู่ `bash devblog-smoke.sh` ควรจบด้วยประมาณนี้:
+
+```txt
+▶ Read the post by slug (approved comments only — pending one is hidden)
+{
+  "title": "Hello, DevBlog",
+  "author": { "displayName": "Ava Author" },
+  "comments": []
+}
+
+▶ Done ✅  (post hello-devblog)
+```
+
+post ถูกเผยแพร่และอ่านผ่าน slug ได้; `comments` ว่างเพราะอันที่เราเพิ่งเพิ่มยังเป็น *pending* อยู่ — ตรงกับพฤติกรรม pre-moderation จากโมดูล Comments พอดี ใน Postman คุณจะเห็นแบบเดียวกันทีละ request พร้อมเครื่องหมายถูกสีเขียวของ test ที่ยืนยันการจับค่าแต่ละครั้ง
+
+## Recap
+
+ตอนนี้คุณมีสองวิธีลงมือขับทั้ง GraphQL API: สคริปต์ `curl` + `jq` สำหรับ smoke test แบบครบ lifecycle ในคำสั่งเดียว และ Postman collection แบบเชื่อมต่อกัน (GraphQL body mode) สำหรับการสำรวจแบบ interactive — ทั้งคู่รู้จัก auth และครอบคลุม auth, tag, post, การเผยแพร่ และ comment เก็บสคริปต์ smoke ไว้ใน repo เพราะมันคือการเช็ก "ฉันทำ API พังหรือเปล่า?" ที่เร็วที่สุดหลังแก้โค้ดทุกครั้ง

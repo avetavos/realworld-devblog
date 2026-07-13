@@ -1,0 +1,291 @@
+{
+  "info": {
+    "name": "DevBlog GraphQL API",
+    "description": "The complete DevBlog GraphQL API (NestJS code-first). One endpoint — `{{base_url}}` = http://localhost:4000/graphql. Run top-to-bottom: Register/Login captures the JWT into `token`, and Create post captures `post_id`/`post_slug` (Add comment captures `comment_id`), so later requests just work.\n\nModeration requests (Pending comments, Moderate comment, Delete post) need an ADMIN user — promote your user in mongosh (see the Docker module). Bring the stack up first with `docker compose up`.",
+    "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
+  },
+  "auth": {
+    "type": "bearer",
+    "bearer": [{ "key": "token", "value": "{{token}}", "type": "string" }]
+  },
+  "variable": [
+    { "key": "base_url", "value": "http://localhost:4000/graphql" },
+    { "key": "email", "value": "author@devblog.dev" },
+    { "key": "password", "value": "correct-horse" },
+    { "key": "tag_name", "value": "NestJS" },
+    { "key": "token", "value": "" },
+    { "key": "post_id", "value": "" },
+    { "key": "post_slug", "value": "" },
+    { "key": "comment_id", "value": "" }
+  ],
+  "item": [
+    {
+      "name": "Auth",
+      "item": [
+        {
+          "name": "Register",
+          "request": {
+            "auth": { "type": "noauth" },
+            "method": "POST",
+            "header": [],
+            "url": { "raw": "{{base_url}}", "host": ["{{base_url}}"] },
+            "body": {
+              "mode": "graphql",
+              "graphql": {
+                "query": "mutation Register($input: RegisterInput!) {\n  register(input: $input) {\n    token\n    user { id displayName role }\n  }\n}",
+                "variables": "{\n  \"input\": {\n    \"email\": \"{{email}}\",\n    \"password\": \"{{password}}\",\n    \"displayName\": \"Ava Author\"\n  }\n}"
+              }
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "const d = pm.response.json().data;",
+                  "if (d && d.register && d.register.token) { pm.collectionVariables.set('token', d.register.token); }",
+                  "pm.test('got a token', () => pm.expect(d.register.token).to.be.a('string'));"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Login",
+          "request": {
+            "auth": { "type": "noauth" },
+            "method": "POST",
+            "header": [],
+            "url": { "raw": "{{base_url}}", "host": ["{{base_url}}"] },
+            "body": {
+              "mode": "graphql",
+              "graphql": {
+                "query": "mutation Login($input: LoginInput!) {\n  login(input: $input) {\n    token\n    user { id displayName role }\n  }\n}",
+                "variables": "{\n  \"input\": {\n    \"email\": \"{{email}}\",\n    \"password\": \"{{password}}\"\n  }\n}"
+              }
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "const d = pm.response.json().data;",
+                  "if (d && d.login && d.login.token) { pm.collectionVariables.set('token', d.login.token); }"
+                ]
+              }
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "Tags",
+      "item": [
+        {
+          "name": "Create tag",
+          "request": {
+            "method": "POST",
+            "header": [],
+            "url": { "raw": "{{base_url}}", "host": ["{{base_url}}"] },
+            "body": {
+              "mode": "graphql",
+              "graphql": {
+                "query": "mutation CreateTag($name: String!) {\n  createTag(name: $name) { id name slug }\n}",
+                "variables": "{ \"name\": \"{{tag_name}}\" }"
+              }
+            }
+          }
+        },
+        {
+          "name": "List tags",
+          "request": {
+            "auth": { "type": "noauth" },
+            "method": "POST",
+            "header": [],
+            "url": { "raw": "{{base_url}}", "host": ["{{base_url}}"] },
+            "body": {
+              "mode": "graphql",
+              "graphql": { "query": "query {\n  tags { id name slug }\n}", "variables": "{}" }
+            }
+          }
+        }
+      ]
+    },
+    {
+      "name": "Posts",
+      "item": [
+        {
+          "name": "Create post (draft)",
+          "request": {
+            "method": "POST",
+            "header": [],
+            "url": { "raw": "{{base_url}}", "host": ["{{base_url}}"] },
+            "body": {
+              "mode": "graphql",
+              "graphql": {
+                "query": "mutation CreatePost($input: CreatePostInput!) {\n  createPost(input: $input) { id slug status }\n}",
+                "variables": "{\n  \"input\": {\n    \"title\": \"Hello, DevBlog\",\n    \"body\": \"This is the **first** post.\",\n    \"tags\": [\"nestjs\", \"graphql\"]\n  }\n}"
+              }
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "const p = pm.response.json().data && pm.response.json().data.createPost;",
+                  "if (p) { pm.collectionVariables.set('post_id', p.id); pm.collectionVariables.set('post_slug', p.slug); }",
+                  "pm.test('post created', () => pm.expect(p.id).to.be.a('string'));"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Publish post",
+          "request": {
+            "method": "POST",
+            "header": [],
+            "url": { "raw": "{{base_url}}", "host": ["{{base_url}}"] },
+            "body": {
+              "mode": "graphql",
+              "graphql": {
+                "query": "mutation Publish($id: ID!) {\n  publishPost(id: $id) { id status publishedAt }\n}",
+                "variables": "{ \"id\": \"{{post_id}}\" }"
+              }
+            }
+          }
+        },
+        {
+          "name": "Update post",
+          "request": {
+            "method": "POST",
+            "header": [],
+            "url": { "raw": "{{base_url}}", "host": ["{{base_url}}"] },
+            "body": {
+              "mode": "graphql",
+              "graphql": {
+                "query": "mutation Update($id: ID!, $input: UpdatePostInput!) {\n  updatePost(id: $id, input: $input) { id title }\n}",
+                "variables": "{\n  \"id\": \"{{post_id}}\",\n  \"input\": { \"title\": \"Hello, DevBlog (v2)\" }\n}"
+              }
+            }
+          }
+        },
+        {
+          "name": "Posts (published)",
+          "request": {
+            "auth": { "type": "noauth" },
+            "method": "POST",
+            "header": [],
+            "url": { "raw": "{{base_url}}", "host": ["{{base_url}}"] },
+            "body": {
+              "mode": "graphql",
+              "graphql": {
+                "query": "query Posts {\n  posts(status: PUBLISHED, page: 1, pageSize: 10) {\n    total\n    items { id title slug status }\n  }\n}",
+                "variables": "{}"
+              }
+            }
+          }
+        },
+        {
+          "name": "Post by slug",
+          "request": {
+            "auth": { "type": "noauth" },
+            "method": "POST",
+            "header": [],
+            "url": { "raw": "{{base_url}}", "host": ["{{base_url}}"] },
+            "body": {
+              "mode": "graphql",
+              "graphql": {
+                "query": "query Post($slug: String!) {\n  post(slug: $slug) {\n    id title body\n    author { displayName }\n    comments { authorName body status }\n  }\n}",
+                "variables": "{ \"slug\": \"{{post_slug}}\" }"
+              }
+            }
+          }
+        },
+        {
+          "name": "Delete post (admin)",
+          "request": {
+            "method": "POST",
+            "header": [],
+            "url": { "raw": "{{base_url}}", "host": ["{{base_url}}"] },
+            "body": {
+              "mode": "graphql",
+              "graphql": {
+                "query": "mutation Delete($id: ID!) {\n  deletePost(id: $id)\n}",
+                "variables": "{ \"id\": \"{{post_id}}\" }"
+              }
+            }
+          }
+        }
+      ]
+    },
+    {
+      "name": "Comments",
+      "item": [
+        {
+          "name": "Add comment (public)",
+          "request": {
+            "auth": { "type": "noauth" },
+            "method": "POST",
+            "header": [],
+            "url": { "raw": "{{base_url}}", "host": ["{{base_url}}"] },
+            "body": {
+              "mode": "graphql",
+              "graphql": {
+                "query": "mutation AddComment($postId: ID!, $input: AddCommentInput!) {\n  addComment(postId: $postId, input: $input) { id authorName status }\n}",
+                "variables": "{\n  \"postId\": \"{{post_id}}\",\n  \"input\": {\n    \"authorName\": \"Alex\",\n    \"authorEmail\": \"alex@example.com\",\n    \"body\": \"Great post, thanks!\"\n  }\n}"
+              }
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "const c = pm.response.json().data && pm.response.json().data.addComment;",
+                  "if (c) { pm.collectionVariables.set('comment_id', c.id); }"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Pending comments (admin)",
+          "request": {
+            "method": "POST",
+            "header": [],
+            "url": { "raw": "{{base_url}}", "host": ["{{base_url}}"] },
+            "body": {
+              "mode": "graphql",
+              "graphql": {
+                "query": "query Pending($postId: ID!) {\n  comments(postId: $postId, status: PENDING) { id authorName body status }\n}",
+                "variables": "{ \"postId\": \"{{post_id}}\" }"
+              }
+            }
+          }
+        },
+        {
+          "name": "Moderate comment (admin)",
+          "request": {
+            "method": "POST",
+            "header": [],
+            "url": { "raw": "{{base_url}}", "host": ["{{base_url}}"] },
+            "body": {
+              "mode": "graphql",
+              "graphql": {
+                "query": "mutation Moderate($id: ID!) {\n  moderateComment(id: $id, status: APPROVED) { id status }\n}",
+                "variables": "{ \"id\": \"{{comment_id}}\" }"
+              }
+            }
+          }
+        }
+      ]
+    }
+  ]
+}
