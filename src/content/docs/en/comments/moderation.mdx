@@ -1,0 +1,239 @@
+---
+title: Moderation
+description: "Add the admin-only moderateComment mutation, walk the pending → approved/rejected workflow, and confirm an approved comment reaches the public thread built in The comment model."
+sidebar:
+  order: 2
+---
+
+## What we're building
+
+An addition to `apps/api/src/comments/comments.resolver.ts`: `moderateComment`, an admin-only mutation guarded with `@UseGuards(GqlAuthGuard, RolesGuard)` and `@Roles('admin')`, the exact same guard stack [Posts resolver](/devblog/en/graphql-api/posts-resolver/) already used for `deletePost`. No other file changes — `comments`, `addComment`, `CommentsService`, and `PostCommentsResolver` all keep the shape [The comment model](/devblog/en/comments/comment-model/) gave them; this lesson only adds the one operation an admin needs to move a comment out of `pending`.
+
+## Why
+
+Every comment [The comment model](/devblog/en/comments/comment-model/) creates enters at `status: 'pending'` and stays invisible to `comments`' default view forever unless something explicitly changes it. `moderateComment` is that something: it takes a comment `id` and a target `CommentStatus`, and updates exactly one field. There's no separate `approveComment`/`rejectComment` pair — a single mutation parameterized by the target status covers both outcomes of the same decision, the same way `PostsService.findPage` takes a `status` argument rather than DevBlog having separate query methods per `PostStatus` value.
+
+The guard stack matters here in a way it didn't for `comments`. `comments` had to stay reachable by anonymous callers, so it uses `OptionalGqlAuthGuard` and gates behavior with a plain `if` inside the resolver. `moderateComment` has no equivalent public case at all — there is no meaningful anonymous or non-admin invocation of "change this comment's status," so it uses the strict pair from [Guards & roles](/devblog/en/auth/guards-roles/): `GqlAuthGuard` rejects any request with no valid token before the resolver body ever runs, and `RolesGuard` plus `@Roles('admin')` rejects a valid-but-non-admin token just as early. Compare that to `comments`, which never rejects anyone — it just narrows what a non-admin, or an admin who asked for nothing specific, is allowed to see. Two operations on the same `Comment` type, two different privilege shapes, because "read the public thread" and "decide what enters the public thread" are genuinely different questions with different answers for an anonymous caller: the first must always succeed, the second must never even start.
+
+Moderation as built here is entirely manual and reactive: a comment sits in `pending` until an admin notices it and acts. Three real extensions are worth naming even though DevBlog doesn't build them in this course. **Spam prevention** — some simple heuristic (a link-count threshold, a denylist of known-bad phrases, or a third-party service like Akismet) run inside `CommentsService.add` before a comment is even persisted as `pending`, so obvious spam never reaches an admin's queue at all. **Rate limiting** — nothing currently stops one visitor from submitting hundreds of comments a minute; a per-IP or per-`authorEmail` throttle on `addComment` (NestJS's `@nestjs/throttler` is the natural fit) would cap that. **Email notification on new comment** — right now an admin only discovers a new pending comment by polling `comments(status: PENDING)`; a hook in `CommentsService.add` that emails the admin (or the post's author) the moment a comment lands would turn moderation from "check periodically" into "respond when notified." None of these change `moderateComment`'s own shape — they're all upstream of it, at the point a comment is created or queued.
+
+## Pros & cons
+
+**Silently downgrading a non-admin's `status` argument (this module) vs. throwing, the way `posts(status: DRAFT)` does for a non-author (Content Workflow).** [Draft → published](/devblog/en/content-workflow/draft-publish/) made `posts` throw a `403 ForbiddenException` the moment an unauthenticated caller asked for `status: DRAFT` — an explicit, debuggable signal that the request was rejected for a specific reason. `comments`, from [The comment model](/devblog/en/comments/comment-model/), does the opposite on purpose: a non-admin passing `status: PENDING` gets back `APPROVED` results with no error at all, as if they'd never passed the argument. Throwing is the more honest choice — a client immediately knows it asked for something it isn't allowed to have. Silently substituting is the safer choice for a query every anonymous visitor's browser calls on every post page load: `comments` is closer to a public content widget than an authoring workflow, and a caller probing it with `status: REJECTED` just to see what happens shouldn't get an error response confirming a privileged code path exists at all — it should just look like the argument did nothing. `posts` and `comments` reach opposite conclusions on the same kind of question because one is a workflow tool for authenticated users and the other is a public rendering path, not because the two lessons disagree with each other.
+
+## Set it up
+
+Update `apps/api/src/comments/comments.resolver.ts` to add `moderateComment`:
+
+```ts
+import { UseGuards } from '@nestjs/common';
+import { Args, ID, Mutation, Parent, Query, ResolveField, Resolver } from '@nestjs/graphql';
+import { CommentsService } from './comments.service';
+import { Comment } from './models/comment.model';
+import { CommentStatus } from './enums/comment-status.enum';
+import { AddCommentInput } from './dto/add-comment.input';
+import { CommentDocument } from './schemas/comment.schema';
+import { GqlAuthGuard } from '../auth/gql-auth.guard';
+import { OptionalGqlAuthGuard } from '../auth/optional-gql-auth.guard';
+import { RolesGuard } from '../auth/roles.guard';
+import { Roles } from '../auth/roles.decorator';
+import { CurrentUser } from '../auth/current-user.decorator';
+
+interface AuthenticatedUser {
+  userId: string;
+  email: string;
+  role: 'author' | 'admin';
+}
+
+@Resolver(() => Comment)
+export class CommentsResolver {
+  constructor(private readonly commentsService: CommentsService) {}
+
+  @Mutation(() => Comment)
+  addComment(
+    @Args('postId', { type: () => ID }) postId: string,
+    @Args('input') input: AddCommentInput,
+  ): Promise<CommentDocument> {
+    return this.commentsService.add(postId, input);
+  }
+
+  @Query(() => [Comment])
+  @UseGuards(OptionalGqlAuthGuard)
+  comments(
+    @Args('postId', { type: () => ID }) postId: string,
+    @Args('status', { type: () => CommentStatus, nullable: true }) status?: CommentStatus,
+    @CurrentUser() currentUser?: AuthenticatedUser,
+  ): Promise<CommentDocument[]> {
+    const isAdmin = currentUser?.role === 'admin';
+    const effectiveStatus = isAdmin && status ? status : CommentStatus.APPROVED;
+    return this.commentsService.findByPost(postId, effectiveStatus);
+  }
+
+  @Mutation(() => Comment)
+  @UseGuards(GqlAuthGuard, RolesGuard)
+  @Roles('admin')
+  moderateComment(
+    @Args('id', { type: () => ID }) id: string,
+    @Args('status', { type: () => CommentStatus }) status: CommentStatus,
+  ): Promise<CommentDocument> {
+    return this.commentsService.moderate(id, status);
+  }
+
+  @ResolveField(() => ID)
+  postId(@Parent() comment: CommentDocument): string {
+    return comment.post.toString();
+  }
+}
+```
+
+- **`moderateComment`** takes `status: CommentStatus!` with no `nullable: true` — unlike `comments`' optional `status` argument, there is no meaningful "moderate to no particular status" call, so the argument is required.
+- **`@UseGuards(GqlAuthGuard, RolesGuard)` before `@Roles('admin')`** — the same ordering rule [Guards & roles](/devblog/en/auth/guards-roles/) already established for `deletePost`: `RolesGuard` reads `req.user.role`, which only exists once `GqlAuthGuard` has already run and attached it.
+- **No branch, no `if`, in `moderateComment` itself** — every access decision already happened in the guards before this method's body runs; the resolver is back to being a one-line delegation, the same shape [Refactoring pass](/devblog/en/content-workflow/refactoring-pass/) restored to `PostsResolver.posts` after its own access-control logic briefly lived in the resolver.
+
+Update `apps/api/src/comments/comments.service.ts` to add `moderate`:
+
+```ts
+import { ForbiddenException, Injectable, NotFoundException } from '@nestjs/common';
+import { InjectModel } from '@nestjs/mongoose';
+import { Model } from 'mongoose';
+import { Comment, CommentDocument } from './schemas/comment.schema';
+import { CommentStatus } from './enums/comment-status.enum';
+import { AddCommentInput } from './dto/add-comment.input';
+import { PostsService } from '../posts/posts.service';
+
+@Injectable()
+export class CommentsService {
+  constructor(
+    @InjectModel(Comment.name) private readonly commentModel: Model<CommentDocument>,
+    private readonly postsService: PostsService,
+  ) {}
+
+  async add(postId: string, input: AddCommentInput): Promise<CommentDocument> {
+    const post = await this.postsService.findById(postId);
+    if (!post) {
+      throw new NotFoundException('Post not found');
+    }
+    if (post.status !== 'published') {
+      throw new ForbiddenException('Cannot comment on a post that is not published');
+    }
+
+    const created = new this.commentModel({
+      ...input,
+      post: postId,
+      status: CommentStatus.PENDING,
+    });
+    return created.save();
+  }
+
+  findByPost(postId: string, status?: CommentStatus): Promise<CommentDocument[]> {
+    const filter: Record<string, unknown> = { post: postId };
+    if (status) {
+      filter.status = status;
+    }
+    return this.commentModel.find(filter).sort({ createdAt: -1 }).exec();
+  }
+
+  async moderate(id: string, status: CommentStatus): Promise<CommentDocument> {
+    const updated = await this.commentModel.findByIdAndUpdate(id, { status }, { new: true }).exec();
+    if (!updated) {
+      throw new NotFoundException('Comment not found');
+    }
+    return updated;
+  }
+}
+```
+
+`moderate` follows the exact `findByIdAndUpdate` + null-guard + `NotFoundException` shape `PostsService.publish` already established in [Posts resolver](/devblog/en/graphql-api/posts-resolver/) — a moderation action and a publish action are the same kind of operation underneath: flip one status field on an existing document, or fail with a `404` if it doesn't exist.
+
+The admin-visible path through `comments` needs no new code — it was already written into `CommentsResolver.comments` in [The comment model](/devblog/en/comments/comment-model/):
+
+```ts
+comments(
+  @Args('postId', { type: () => ID }) postId: string,
+  @Args('status', { type: () => CommentStatus, nullable: true }) status?: CommentStatus,
+  @CurrentUser() currentUser?: AuthenticatedUser,
+): Promise<CommentDocument[]> {
+  const isAdmin = currentUser?.role === 'admin';
+  const effectiveStatus = isAdmin && status ? status : CommentStatus.APPROVED;
+  return this.commentsService.findByPost(postId, effectiveStatus);
+}
+```
+
+Worth tracing through explicitly now that there's a real reason to call it with `status: PENDING`: `OptionalGqlAuthGuard` runs first and populates `@CurrentUser()` from a valid `Authorization` header, or leaves it `undefined` for no header at all — it never rejects the request either way. `isAdmin` is `true` only when `currentUser` exists **and** its `role` is `'admin'`. `effectiveStatus` only becomes the caller's requested `status` when `isAdmin` is `true` **and** a `status` was actually passed; every other combination — no token, an author's token, an admin's token with no `status` argument — falls through to `CommentStatus.APPROVED`. An admin who wants the moderation queue has to be both signed in as `admin` and explicit about asking for `PENDING`; there's no way to get anything but the public view by accident.
+
+## Verify
+
+```bash
+npm run start:dev
+```
+
+With an admin's `Authorization` header in the Sandbox (an account with `role: "admin"` — see [Guards & roles](/devblog/en/auth/guards-roles/) if you need to check how a user's role is set), list the pending comment created in [The comment model](/devblog/en/comments/comment-model/)'s Verify section:
+
+```graphql
+query PendingComments {
+  comments(postId: "<same post id>", status: PENDING) {
+    id
+    authorName
+    status
+  }
+}
+```
+
+```txt
+{
+  "data": {
+    "comments": [
+      { "id": "...", "authorName": "Alex", "status": "PENDING" }
+    ]
+  }
+}
+```
+
+Approve it:
+
+```graphql
+mutation ApproveComment {
+  moderateComment(id: "<the comment id above>", status: APPROVED) {
+    id
+    status
+  }
+}
+```
+
+```txt
+{
+  "data": {
+    "moderateComment": { "id": "...", "status": "APPROVED" }
+  }
+}
+```
+
+Now run the public `comments` query again, with no `Authorization` header at all — the same query [The comment model](/devblog/en/comments/comment-model/)'s Verify section ran when it still returned nothing:
+
+```graphql
+query PublicCommentsAfterApproval {
+  comments(postId: "<same post id>") {
+    id
+    authorName
+    status
+  }
+}
+```
+
+```txt
+{
+  "data": {
+    "comments": [
+      { "id": "...", "authorName": "Alex", "status": "APPROVED" }
+    ]
+  }
+}
+```
+
+The exact comment that was invisible a lesson ago now appears, with no other write besides `moderateComment` — the one-field status change is the only thing that changed between the two runs of the same public query. Try `moderateComment` again with an author's (non-admin) token instead, and it fails before `CommentsService.moderate` ever runs, confirming `RolesGuard` is live on a real mutation.
+
+## Recap
+
+`moderateComment` is a strict admin-only mutation — `GqlAuthGuard` plus `RolesGuard` and `@Roles('admin')`, the same guard pair [Posts resolver](/devblog/en/graphql-api/posts-resolver/) already used for `deletePost` — that flips a comment's `status` via `CommentsService.moderate`, following the identical `findByIdAndUpdate`-then-null-guard shape `PostsService.publish` established first. The admin-visible `comments(status: PENDING)` path needed no new code: `OptionalGqlAuthGuard` populates `@CurrentUser()` without ever rejecting the call, and a plain `isAdmin && status` check decides whether the caller's requested status is honored or silently replaced with `APPROVED` — a deliberate divergence from `posts`' throw-on-unauthorized-`DRAFT` pattern, chosen because `comments` is a public rendering path, not an authoring workflow. Spam prevention, rate limiting, and new-comment email notification are all real, named gaps this course leaves for a production deployment to close, each one upstream of `moderateComment` rather than a change to it.
+
+Next: [Frontend Foundations →](/devblog/en/frontend-foundations/)

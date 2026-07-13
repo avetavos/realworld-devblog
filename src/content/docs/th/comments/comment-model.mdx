@@ -1,0 +1,459 @@
+---
+title: โมเดล Comment
+description: "โมเดล Comment เป็น GraphQL type แบบ code-first เพิ่ม mutation addComment แบบสาธารณะ และ query comments ที่รู้เรื่อง moderation พร้อม resolve เธรดคอมเมนต์ที่ approved แล้วของโพสต์ด้วย @ResolveField()"
+sidebar:
+  order: 1
+---
+
+## What we're building
+
+`apps/api/src/comments/enums/comment-status.enum.ts` (`CommentStatus` ลงทะเบียนด้วย `registerEnumType`), `apps/api/src/comments/models/comment.model.ts` (`Comment`), `apps/api/src/comments/dto/add-comment.input.ts` (`AddCommentInput`), `apps/api/src/comments/comments.service.ts` (`CommentsService.add`/`findByPost`) และ `apps/api/src/comments/comments.resolver.ts` (`CommentsResolver` พร้อม mutation `addComment` แบบสาธารณะ และ query `comments` ที่รู้เรื่อง moderation) นอกจากนี้ ไฟล์เล็ก ๆ `apps/api/src/comments/post-comments.resolver.ts` (`PostCommentsResolver`) จะให้ type `Post` — จาก [Code-first basics](/devblog/th/graphql-api/code-first-basics/) — field ใหม่ชื่อ `comments` และ `CommentsModule` จะถูกลงทะเบียนใน `app.module.ts` บทเรียนนี้ใช้ Mongoose schema ของ `Comment` ตามที่ [Schemas](/devblog/th/data-modeling/schemas/) วางไว้เป๊ะ ไม่มีการแก้ไขใด ๆ
+
+## Why
+
+`Comment.status` จาก [Schemas](/devblog/th/data-modeling/schemas/) มีค่าเริ่มต้นเป็น `'pending'` อยู่แล้ว ซึ่งหมายความว่า schema ได้ตัดสินใจเรื่องออกแบบหลักของบทเรียนนี้ไปแล้วตั้งแต่ก่อนที่ resolver code จะมีอยู่ด้วยซ้ำ: คอมเมนต์ใหม่ทุกอันเริ่มต้นแบบมองไม่เห็น และต้องมีบางอย่างมา promote มันไปเป็น `'approved'` อย่างจริงจังก่อนที่ผู้อ่านสาธารณะจะเห็นมันได้ `addComment` ตั้งใจให้เป็น mutation สาธารณะที่ไม่มี guard เลย — การคอมเมนต์คือ write operation เดียวใน DevBlog ที่ผู้เยี่ยมชมที่ไม่ล็อกอินได้รับอนุญาตให้ทำ เหมือนกับที่ `register`/`login` ใน [Auth resolver & GraphQL setup](/devblog/th/auth/auth-resolver/) เข้าถึงได้โดยไม่มี token แต่ต่างจากการลงทะเบียน คอมเมนต์ที่ส่งเข้ามาไม่ได้กลายเป็นมองเห็นได้ด้วยตัวมันเอง มันแค่เข้าคิวรอ
+
+`CommentsService.add` ยังต้องตอบคำถามที่ `PostsService.create` ไม่เคยต้องถามด้วย: โพสต์ที่กำลังถูกคอมเมนต์มีอยู่จริงไหม และตอนนี้สาธารณะได้รับอนุญาตให้เห็นมันหรือเปล่า? คอมเมนต์บนโพสต์ที่ไม่มีอยู่จริงคือ `404`; คอมเมนต์ที่พยายามทำบนโพสต์ที่ยังเป็น `draft` คือ `403` — ไม่มีใครนอกจาก author ของมันหรือ admin ที่รู้ว่าโพสต์นั้นมีอยู่แล้ว การปล่อยให้คอมเมนต์แนบเข้ากับมันได้จะรั่วการมีอยู่ของ draft ออกไปทาง side channel ที่ guard ของ `posts(status: DRAFT)` เองจาก [Draft → published](/devblog/th/content-workflow/draft-publish/) ถูกสร้างขึ้นมาเพื่อป้องกันไว้พอดี
+
+GraphQL type ของ `Comment` เปิดเผย `authorEmail` — field เดียวกับที่ [Schemas](/devblog/th/data-modeling/schemas/) เก็บไว้อยู่แล้ว บันทึกไว้ตอนส่งคอมเมนต์ เพราะผู้คอมเมนต์ไม่ใช่บัญชี `User` ที่ยืนยันตัวตนแล้ว นั่นคือ trade-off ด้าน privacy จริง ๆ ที่ตั้งใจทำ เขียนไว้ตรงนี้อย่างชัดเจนแทนที่จะละไว้: client ตัวไหนก็ตามที่ query `comments` ได้ ก็อ่านอีเมลของผู้คอมเมนต์ทุกคนกลับมาได้ รวมถึงผู้อ่านที่ไม่ล็อกอินบนเว็บสาธารณะด้วย DevBlog เลือกทำแบบง่าย ๆ แบบนี้สำหรับคอร์สนี้ แต่การจำกัด `authorEmail` ให้เป็น field เฉพาะ admin — ไม่ว่าจะด้วยการเช็คระดับ resolver คล้ายกับการคุม status ของ `comments` ด้านล่าง หรือย้ายมันออกจาก `Comment` type สาธารณะไปเป็น shape เฉพาะ admin ไปเลย — ก็เป็นงานต่อยอดที่สมเหตุสมผลสำหรับการใช้งานจริง ไม่ใช่ช่องว่างที่บทเรียนนี้แสร้งทำเป็นไม่มีอยู่
+
+query `comments` เองต้องรองรับผู้ใช้สองกลุ่มจาก operation เดียว รูปแบบเดียวกับที่ [Draft → published](/devblog/th/content-workflow/draft-publish/) แก้ไว้แล้วสำหรับ `posts`: ผู้อ่านสาธารณะที่ควรเห็นแค่คอมเมนต์ `approved` เท่านั้น กับ admin ที่กำลังตรวจสอบคิวซึ่งต้องเห็น `pending`/`rejected` ด้วย `OptionalGqlAuthGuard` คือเครื่องมือที่ถูกต้องอีกครั้ง — มันไม่ปฏิเสธการเรียกแบบไม่ล็อกอินเลย แค่เติม `@CurrentUser()` เมื่อมี token ที่ใช้ได้จริง ตรงตามที่ [Draft → published](/devblog/th/content-workflow/draft-publish/) อธิบายไว้ แต่สิ่งที่ `comments` ทำกับข้อมูลนั้นตั้งใจให้ต่างจากวิธีที่ `posts` จัดการ `status: DRAFT` — ดู Pros & cons ด้านล่าง
+
+สุดท้าย `Post` ต้องมี field `comments` เพื่อให้ client ดึงโพสต์พร้อมเธรดที่ approved แล้วได้ใน request เดียว ที่ที่เป็นธรรมชาติที่สุดในการทำแบบนี้คือ method `@ResolveField(() => [Comment])` — แต่การเขียนมันไว้ใน `PostsResolver` (ใน `posts/`) จะบังคับให้ `PostsModule` ต้อง import `CommentsModule` เพื่อเอา `CommentsService` มาใช้ `CommentsModule` เองก็ต้อง import `PostsModule` อยู่แล้ว สำหรับการเช็คว่าโพสต์มีอยู่จริงใน `CommentsService.add` — การ import กันไปมาทั้งสองทางคือกับดัก circular-dependency พอดี NestJS resolve field ของ type ด้วยการสแกนทุกคลาส `@Resolver(() => X)` ที่ลงทะเบียนไว้ทุกที่ในแอป ไม่ใช่แค่คลาสที่อยู่ใน module ของ `X` เอง ดังนั้น `PostCommentsResolver` จึงอยู่ใน `comments/` ได้ทั้งหมด inject แค่ `CommentsService` และเพิ่ม field ให้ `Post` ได้โดยที่ `PostsModule` ไม่ต้องรู้เลยว่า `CommentsModule` มีอยู่ ความสัมพันธ์ยังคงเป็นทางเดียว: comments พึ่งพา posts, posts ไม่พึ่งพา comments เลย
+
+## Pros & cons
+
+**Pre-moderation (กักคอมเมนต์ทุกอันไว้จนกว่าจะ approve) เทียบกับ post-moderation (เผยแพร่ทันที แล้วลบอันแย่ ๆ ออกทีหลัง)** `Comment.status` ที่มีค่าเริ่มต้นเป็น `'pending'` คือ pre-moderation: ไม่มีอะไรที่ผู้เยี่ยมชมเขียนจะไปถึงเธรดสาธารณะจนกว่า admin จะ approve มันอย่างชัดเจน นั่นรับประกันว่าหน้าสาธารณะของโพสต์ไหนก็ตามจะไม่มีวันแสดง spam การล่วงละเมิด หรือ noise ที่ไม่เกี่ยวข้อง แม้แต่ชั่วขณะเดียว — ต้นทุนคือคอมเมนต์จริงจากคนจริงจะมองไม่เห็นไปนานเท่าที่ admin จะรีวิวเสร็จ ซึ่งอาจทำให้เธรดของโพสต์ที่จริง ๆ แล้ว active ดูว่างเปล่ากว่าที่มันเป็นจริง ๆ ทันทีหลังมีคอมเมนต์เข้ามาเยอะ post-moderation กลับด้าน trade-off นี้: ทุกคอมเมนต์ปรากฏทันทีที่ส่งเข้ามา เธรดจึงดู active เท่าที่มันเป็นจริงเสมอ และงานของ admin กลายเป็นการเก็บกวาดเชิงรับแทนที่จะเป็นคิวเฝ้าประตู — แต่นั่นหมายความว่าคอมเมนต์ที่แย่ที่สุดเท่าที่จะเป็นไปได้ก็ live และมองเห็นได้ต่อสาธารณะไปนานเท่าที่จะมีใครสักคนสังเกตเห็นแล้วลบมันออก โดยไม่มีการหน่วงเวลาเพื่อจับมันก่อนเลย DevBlog เลือกฝั่ง pre-moderation อย่างตั้งใจ เหมือนกับที่ [Schemas](/devblog/th/data-modeling/schemas/) เลือกไว้ตั้งแต่ก่อน resolver จะมีอยู่ด้วยซ้ำ: บล็อกเล็ก ๆ ที่มี admin คนเดียวสามารถรีวิวคอมเมนต์ใหม่ที่ทยอยเข้ามาได้ทันเวลาอย่างสมเหตุสมผล และต้นทุนของ spam ที่มองเห็นได้หนึ่งอันถูกตัดสินว่าสูงกว่าต้นทุนของการหน่วงเวลาสั้น ๆ สำหรับคอมเมนต์จริง เว็บที่มีทราฟฟิกสูงและมีบรรณาธิการหลายคนน่าจะเลือกตรงข้ามกัน
+
+## Set it up
+
+สร้าง `apps/api/src/comments/enums/comment-status.enum.ts`:
+
+```ts
+import { registerEnumType } from '@nestjs/graphql';
+
+export enum CommentStatus {
+  PENDING = 'pending',
+  APPROVED = 'approved',
+  REJECTED = 'rejected',
+}
+
+registerEnumType(CommentStatus, {
+  name: 'CommentStatus',
+  description: 'Moderation status of a comment — mirrors Comment.status from Data Modeling.',
+});
+```
+
+สร้าง `apps/api/src/comments/models/comment.model.ts`:
+
+```ts
+import { Field, ID, ObjectType } from '@nestjs/graphql';
+import { CommentStatus } from '../enums/comment-status.enum';
+
+@ObjectType()
+export class Comment {
+  @Field(() => ID)
+  id: string;
+
+  @Field(() => ID)
+  postId: string;
+
+  @Field()
+  authorName: string;
+
+  @Field()
+  authorEmail: string;
+
+  @Field()
+  body: string;
+
+  @Field(() => CommentStatus)
+  status: CommentStatus;
+
+  @Field()
+  createdAt: Date;
+}
+```
+
+สร้าง `apps/api/src/comments/dto/add-comment.input.ts`:
+
+```ts
+import { Field, InputType } from '@nestjs/graphql';
+import { IsEmail, IsString, MinLength } from 'class-validator';
+
+@InputType()
+export class AddCommentInput {
+  @Field()
+  @IsString()
+  @MinLength(2)
+  authorName: string;
+
+  @Field()
+  @IsEmail()
+  authorEmail: string;
+
+  @Field()
+  @IsString()
+  @MinLength(5)
+  body: string;
+}
+```
+
+สร้าง `apps/api/src/comments/comments.service.ts`:
+
+```ts
+import { ForbiddenException, Injectable, NotFoundException } from '@nestjs/common';
+import { InjectModel } from '@nestjs/mongoose';
+import { Model } from 'mongoose';
+import { Comment, CommentDocument } from './schemas/comment.schema';
+import { CommentStatus } from './enums/comment-status.enum';
+import { AddCommentInput } from './dto/add-comment.input';
+import { PostsService } from '../posts/posts.service';
+
+@Injectable()
+export class CommentsService {
+  constructor(
+    @InjectModel(Comment.name) private readonly commentModel: Model<CommentDocument>,
+    private readonly postsService: PostsService,
+  ) {}
+
+  async add(postId: string, input: AddCommentInput): Promise<CommentDocument> {
+    const post = await this.postsService.findById(postId);
+    if (!post) {
+      throw new NotFoundException('Post not found');
+    }
+    if (post.status !== 'published') {
+      throw new ForbiddenException('Cannot comment on a post that is not published');
+    }
+
+    const created = new this.commentModel({
+      ...input,
+      post: postId,
+      status: CommentStatus.PENDING,
+    });
+    return created.save();
+  }
+
+  findByPost(postId: string, status?: CommentStatus): Promise<CommentDocument[]> {
+    const filter: Record<string, unknown> = { post: postId };
+    if (status) {
+      filter.status = status;
+    }
+    return this.commentModel.find(filter).sort({ createdAt: -1 }).exec();
+  }
+}
+```
+
+สร้าง `apps/api/src/comments/comments.resolver.ts`:
+
+```ts
+import { UseGuards } from '@nestjs/common';
+import { Args, ID, Mutation, Parent, Query, ResolveField, Resolver } from '@nestjs/graphql';
+import { CommentsService } from './comments.service';
+import { Comment } from './models/comment.model';
+import { CommentStatus } from './enums/comment-status.enum';
+import { AddCommentInput } from './dto/add-comment.input';
+import { CommentDocument } from './schemas/comment.schema';
+import { OptionalGqlAuthGuard } from '../auth/optional-gql-auth.guard';
+import { CurrentUser } from '../auth/current-user.decorator';
+
+interface AuthenticatedUser {
+  userId: string;
+  email: string;
+  role: 'author' | 'admin';
+}
+
+@Resolver(() => Comment)
+export class CommentsResolver {
+  constructor(private readonly commentsService: CommentsService) {}
+
+  @Mutation(() => Comment)
+  addComment(
+    @Args('postId', { type: () => ID }) postId: string,
+    @Args('input') input: AddCommentInput,
+  ): Promise<CommentDocument> {
+    return this.commentsService.add(postId, input);
+  }
+
+  @Query(() => [Comment])
+  @UseGuards(OptionalGqlAuthGuard)
+  comments(
+    @Args('postId', { type: () => ID }) postId: string,
+    @Args('status', { type: () => CommentStatus, nullable: true }) status?: CommentStatus,
+    @CurrentUser() currentUser?: AuthenticatedUser,
+  ): Promise<CommentDocument[]> {
+    const isAdmin = currentUser?.role === 'admin';
+    const effectiveStatus = isAdmin && status ? status : CommentStatus.APPROVED;
+    return this.commentsService.findByPost(postId, effectiveStatus);
+  }
+
+  @ResolveField(() => ID)
+  postId(@Parent() comment: CommentDocument): string {
+    return comment.post.toString();
+  }
+}
+```
+
+- **`addComment`** ไม่มี `@UseGuards()` เลย — การคอมเมนต์เปิดให้ทุกคน เป็นเส้นทางเขียนเดียวใน DevBlog ที่ไม่ต้องใช้ token
+- **`comments`** guard ด้วย `OptionalGqlAuthGuard` ไม่ใช่ `GqlAuthGuard` — มันต้องทำงานต่อไปได้แม้ไม่มีการยืนยันตัวตนเลย เพราะทุกหน้าโพสต์สาธารณะเรียกมัน `effectiveStatus` จะกลายเป็นอย่างอื่นที่ไม่ใช่ `APPROVED` ก็ต่อเมื่อผู้เรียกทั้งล็อกอินอยู่ **และ** `role === 'admin'` **และ** ส่ง argument `status` มาจริง ๆ เท่านั้น — สั้นกว่านั้นแค่ข้อเดียว ไม่ว่าจะไม่มี token, token ของคนที่ไม่ใช่ admin, หรือ admin ที่ไม่ได้ขออะไรเจาะจง — จะได้ `APPROVED` แบบเงียบ ๆ ไม่มี error เลย
+- **`postId`** เป็น `@ResolveField()` ไม่ใช่ค่า `@Field()` ธรรมดา — Mongoose schema ของ `Comment` เก็บ reference เป็น `post: Types.ObjectId` ดังนั้น method นี้จึงเชื่อมความต่างของชื่อ field และ type แบบเดียวกับที่ `PostsResolver.author` เชื่อม `Post.author: Types.ObjectId` ไปเป็น `User` จริง ๆ ใน [Posts resolver](/devblog/th/graphql-api/posts-resolver/) ต่างจาก `author` ตรงที่ไม่มีการ lookup collection ที่สองที่นี่ — แค่ `.toString()` — เพราะ identifier ของโพสต์ในคอมเมนต์ไม่ต้องกลายเป็น object เต็ม ๆ อีกอัน แค่ `ID` ธรรมดาก็พอ
+
+สร้าง `apps/api/src/comments/post-comments.resolver.ts`:
+
+```ts
+import { Parent, ResolveField, Resolver } from '@nestjs/graphql';
+import { Post } from '../posts/models/post.model';
+import { PostDocument } from '../posts/schemas/post.schema';
+import { Comment } from './models/comment.model';
+import { CommentStatus } from './enums/comment-status.enum';
+import { CommentDocument } from './schemas/comment.schema';
+import { CommentsService } from './comments.service';
+
+@Resolver(() => Post)
+export class PostCommentsResolver {
+  constructor(private readonly commentsService: CommentsService) {}
+
+  @ResolveField(() => [Comment])
+  comments(@Parent() post: PostDocument): Promise<CommentDocument[]> {
+    return this.commentsService.findByPost(post.id, CommentStatus.APPROVED);
+  }
+}
+```
+
+- **`PostCommentsResolver`** คือ `@Resolver(() => Post)` เป้าหมายระดับคลาสเดียวกับที่ `PostsResolver` ใช้ แต่มันอยู่ใน `comments/` และถูกลงทะเบียนเป็น provider ใน `CommentsModule` ไม่ใช่ `PostsModule` — schema builder ของ Nest รวบรวม field resolver ของ type จากทุกคลาส `@Resolver(() => Post)` ที่ลงทะเบียนไว้ทั่วทั้งแอป ดังนั้น `Post.comments` กับ `Post.author` จึงถูก implement ไว้คนละ module ได้โดยที่ไม่มี module ไหนต้อง import อีก module หนึ่งเลย
+- **`CommentStatus.APPROVED` ฝังไว้ตายตัว** — field resolver นี้ไม่รับ argument `status` เลยและไม่อ่าน `@CurrentUser()` เลย เธรดคอมเมนต์ที่ฝังอยู่ในโพสต์คือมุมมองสาธารณะที่ approved แล้วเสมอ admin ที่ต้องการคิว moderation ใช้ query `comments` ระดับ root ด้านบน ไม่ใช่ field นี้
+
+อัปเดต `apps/api/src/posts/models/post.model.ts` เพื่อเพิ่ม field ใหม่:
+
+```ts
+import { Field, ID, ObjectType } from '@nestjs/graphql';
+import { User } from '../../users/models/user.model';
+import { PostStatus } from '../enums/post-status.enum';
+import { Comment } from '../../comments/models/comment.model';
+
+@ObjectType()
+export class Post {
+  @Field(() => ID)
+  id: string;
+
+  @Field()
+  title: string;
+
+  @Field()
+  slug: string;
+
+  @Field()
+  body: string;
+
+  @Field({ nullable: true })
+  excerpt?: string;
+
+  @Field({ nullable: true })
+  coverImage?: string;
+
+  @Field(() => PostStatus)
+  status: PostStatus;
+
+  @Field(() => [String])
+  tags: string[];
+
+  @Field({ nullable: true })
+  publishedAt?: Date;
+
+  @Field()
+  createdAt: Date;
+
+  @Field()
+  updatedAt: Date;
+
+  @Field(() => User)
+  author: User;
+
+  @Field(() => [Comment])
+  comments: Comment[];
+}
+```
+
+`comments: Comment[]` ถูกประกาศไว้ตรงนี้ด้วยเหตุผลเดียวกับที่ `author: User` เคยถูกประกาศไว้ใน [Code-first basics](/devblog/th/graphql-api/code-first-basics/) — field ต้องปรากฏบนคลาส `@ObjectType()` ก่อนถึงจะมีอยู่ใน schema ได้เลย `PostCommentsResolver.comments` ด้านบนคือตัวที่ป้อนค่าจริงตอน request ทำงาน การประกาศกับการ resolve อยู่คนละไฟล์กันโดยตั้งใจ
+
+อัปเดต `apps/api/src/posts/posts.module.ts` เพื่อ export `PostsService`:
+
+```ts
+import { Module } from '@nestjs/common';
+import { MongooseModule } from '@nestjs/mongoose';
+import { Post, PostSchema } from './schemas/post.schema';
+import { PostsService } from './posts.service';
+import { PostsResolver } from './posts.resolver';
+import { UsersModule } from '../users/users.module';
+import { CommonModule } from '../common/common.module';
+
+@Module({
+  imports: [
+    MongooseModule.forFeature([{ name: Post.name, schema: PostSchema }]),
+    UsersModule,
+    CommonModule,
+  ],
+  providers: [PostsService, PostsResolver],
+  exports: [PostsService],
+})
+export class PostsModule {}
+```
+
+`exports: [PostsService]` คือการเปลี่ยนแปลงเดียวที่บทเรียนนี้ทำนอก `comments/` นอกเหนือจาก field ใน `Post` model ด้านบน — `CommentsModule` ต้องการให้ `PostsService` inject เข้า `CommentsService` ได้ และ Nest จะยอมให้ทำแบบนั้นก็ต่อเมื่อ module ที่ provide มัน export ออกมาอย่างชัดเจนเท่านั้น
+
+สร้าง `apps/api/src/comments/comments.module.ts`:
+
+```ts
+import { Module } from '@nestjs/common';
+import { MongooseModule } from '@nestjs/mongoose';
+import { Comment, CommentSchema } from './schemas/comment.schema';
+import { CommentsService } from './comments.service';
+import { CommentsResolver } from './comments.resolver';
+import { PostCommentsResolver } from './post-comments.resolver';
+import { PostsModule } from '../posts/posts.module';
+
+@Module({
+  imports: [
+    MongooseModule.forFeature([{ name: Comment.name, schema: CommentSchema }]),
+    PostsModule,
+  ],
+  providers: [CommentsService, CommentsResolver, PostCommentsResolver],
+})
+export class CommentsModule {}
+```
+
+`CommentsModule` import `PostsModule` — ทางเดียวเท่านั้น `PostsModule` ไม่ import `CommentsModule` กลับเลย ซึ่งเป็นสิ่งที่ทำให้คู่นี้ไม่ตกกับดัก circular-dependency ที่ [Comments](/devblog/th/comments/) สืบทอดมาเป็นข้อควรระวังทั่วไปของ NestJS ทันทีที่สอง feature module อ้างอิง service ของกันและกัน
+
+อัปเดต `apps/api/src/app.module.ts` เพื่อลงทะเบียน `CommentsModule` คู่กับ `PostsModule`, `UsersModule`, `AuthModule` และ `TagsModule`:
+
+```ts
+import { join } from 'node:path';
+import { Module } from '@nestjs/common';
+import { ConfigModule, ConfigService } from '@nestjs/config';
+import { MongooseModule } from '@nestjs/mongoose';
+import { GraphQLModule } from '@nestjs/graphql';
+import { ApolloDriver, ApolloDriverConfig } from '@nestjs/apollo';
+import { ApolloServerPluginLandingPageLocalDefault } from '@apollo/server/plugin/landingPage/default';
+import { Logger } from '@nestjs/common';
+import { Connection } from 'mongoose';
+import * as Joi from 'joi';
+import { AppController } from './app.controller';
+import { AppService } from './app.service';
+import { PostsModule } from './posts/posts.module';
+import { UsersModule } from './users/users.module';
+import { AuthModule } from './auth/auth.module';
+import { TagsModule } from './tags/tags.module';
+import { CommentsModule } from './comments/comments.module';
+
+@Module({
+  imports: [
+    ConfigModule.forRoot({
+      isGlobal: true,
+      envFilePath: '../../.env',
+      validationSchema: Joi.object({
+        MONGODB_URI: Joi.string().uri().required(),
+        JWT_SECRET: Joi.string().min(10).required(),
+        API_PORT: Joi.number().port().default(4000),
+        WEB_ORIGIN: Joi.string().uri().required(),
+      }),
+      validationOptions: {
+        allowUnknown: true,
+        abortEarly: false,
+      },
+    }),
+    MongooseModule.forRootAsync({
+      inject: [ConfigService],
+      useFactory: (configService: ConfigService) => ({
+        uri: configService.getOrThrow<string>('MONGODB_URI'),
+        onConnectionCreate: (connection: Connection) => {
+          connection.on('connected', () =>
+            new Logger('MongooseModule').log('MongoDB connected'),
+          );
+          return connection;
+        },
+      }),
+    }),
+    GraphQLModule.forRoot<ApolloDriverConfig>({
+      driver: ApolloDriver,
+      autoSchemaFile: join(process.cwd(), 'src/schema.gql'),
+      sortSchema: true,
+      playground: false,
+      plugins: [ApolloServerPluginLandingPageLocalDefault()],
+      context: ({ req }) => ({ req }),
+    }),
+    PostsModule,
+    UsersModule,
+    AuthModule,
+    TagsModule,
+    CommentsModule,
+  ],
+  controllers: [AppController],
+  providers: [AppService],
+})
+export class AppModule {}
+```
+
+## Verify
+
+```bash
+npm run start:dev
+```
+
+ใช้ id ของโพสต์ที่คุณ publish ไว้ใน Verify section ของ [Draft → published](/devblog/th/content-workflow/draft-publish/) ส่งคอมเมนต์โดยไม่มี header `Authorization` เลย:
+
+```graphql
+mutation AddComment {
+  addComment(
+    postId: "<a published post id>"
+    input: {
+      authorName: "Alex"
+      authorEmail: "alex@example.com"
+      body: "Great post, thanks for writing this up!"
+    }
+  ) {
+    id
+    authorName
+    status
+  }
+}
+```
+
+```txt
+{
+  "data": {
+    "addComment": {
+      "id": "...",
+      "authorName": "Alex",
+      "status": "PENDING"
+    }
+  }
+}
+```
+
+`status: "PENDING"` ยืนยันว่าค่าเริ่มต้นของ Mongoose ของ `Comment.status` จาก [Schemas](/devblog/th/data-modeling/schemas/) ทำงานถูกต้อง ตอนนี้รัน query `comments` สาธารณะสำหรับโพสต์เดียวกัน ยังไม่มี header `Authorization` เหมือนเดิม:
+
+```graphql
+query PublicComments {
+  comments(postId: "<same post id>") {
+    id
+    authorName
+    status
+  }
+}
+```
+
+```txt
+{
+  "data": {
+    "comments": []
+  }
+}
+```
+
+ไม่มีอะไรกลับมาเลย — คอมเมนต์ที่เพิ่งสร้างขึ้นมีอยู่จริง แต่มันยังเป็น `PENDING` และ `comments` บังคับให้เป็น `APPROVED` เสมอสำหรับผู้เรียกทุกคนที่ไม่ใช่ admin ที่ยืนยันตัวตนแล้วและส่ง `status` มาเจาะจง [Moderation](/devblog/th/comments/moderation/) คือจุดที่ admin approve มัน แล้ว query เดียวกันนี้ก็จะเริ่มคืนค่ามันกลับมา
+
+## Recap
+
+`CommentsService.add` ตรวจสอบว่าโพสต์มีอยู่จริงและ `published` แล้วก่อนสร้างคอมเมนต์ เสมอในสถานะ `PENDING` — สะท้อนค่าเริ่มต้นของ [Schemas](/devblog/th/data-modeling/schemas/) เองแทนที่จะคิดใหม่ `addComment` เป็น mutation สาธารณะที่ไม่มี guard เลย `comments` guard ด้วย `OptionalGqlAuthGuard` และบังคับ `APPROVED` แบบเงียบ ๆ สำหรับใครก็ตามที่ไม่ใช่ admin ที่กำลังขอ status เจาะจง ไม่มีวัน throw เลย `Post.comments` เป็น field ใหม่ที่ resolve โดย `PostCommentsResolver` ซึ่งเป็นคลาส `@Resolver(() => Post)` แยกต่างหากที่อยู่ใน `CommentsModule` โดยเฉพาะเพื่อไม่ให้ `PostsModule` ต้อง import `CommentsModule` กลับ — comments พึ่งพา posts เสมอ ไม่มีวันย้อนกลับ คอมเมนต์ที่เพิ่งเขียนไปยังคงมองไม่เห็นสำหรับ query `comments` สาธารณะจนกว่า admin จะลงมือทำอะไรกับมัน
+
+Next: [Moderation →](/devblog/th/comments/moderation/)
