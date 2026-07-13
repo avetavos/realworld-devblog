@@ -1,0 +1,50 @@
+---
+title: Extension exercises
+description: "Eight extension exercises for DevBlog, ordered easy to hard — from an admin-promotion seed and full-text search to DataLoader, rate limiting, and an end-to-end Playwright suite — each with one sentence of guidance."
+sidebar:
+  order: 2
+---
+
+## How to use these
+
+DevBlog is complete as it stands, but a real project is never finished — it grows the moment someone actually uses it. The eight exercises below are ordered roughly easy to hard, and each one plugs a gap the build deliberately left open or extends a feature you already have. Pick them in order or cherry-pick the ones that interest you; each is a self-contained afternoon, not a rewrite. Every exercise gets one sentence of guidance to point you at the right layer — the rest is yours to design.
+
+## The exercises
+
+### 1 · Admin promotion / first-user-is-admin seed
+
+Close the gap the acceptance walk named by hand: add either a guarded `promoteToAdmin` mutation (callable only by an existing admin) or a seed that makes the very first registered user an admin automatically, so there is an auditable, in-app way to create the first administrator instead of editing Mongo directly.
+
+### 2 · Full-text search over posts
+
+Add a `searchPosts(query)` GraphQL query backed by a MongoDB **text index** on the post title and body, returning only published posts ranked by relevance so readers can find content without knowing the exact slug.
+
+### 3 · Cursor-based pagination
+
+Replace (or add alongside) the existing offset pagination with **cursor-based** pagination on the posts query — encode the cursor from a stable sort key like `publishedAt` plus `_id` — so that pages stay correct even as new posts are published between requests.
+
+### 4 · Image uploads for cover images
+
+Let authors attach a cover image to a post by accepting an upload in the admin dashboard, storing the file (local disk for development, an S3-compatible bucket for production) and persisting only its URL on the post document, then rendering it on the public post page and in SEO metadata.
+
+### 5 · Related posts by shared tags
+
+Add a `relatedPosts(slug)` resolver that returns other published posts sharing the most tags with the current one, so the public post page can show a "You might also like" list without any manual curation.
+
+### 6 · DataLoader to fix the `author` N+1
+
+Introduce a request-scoped **DataLoader** for users and use it inside the `@ResolveField author` resolver, so rendering a list of N posts issues one batched user lookup instead of N separate queries — the classic GraphQL N+1 fix.
+
+### 7 · Rate-limit `addComment` and add a spam honeypot
+
+Protect the anonymous comment endpoint with a per-IP rate limit (NestJS's `ThrottlerGuard`) and a hidden **honeypot** field that real users never fill in, dropping any submission that does, so the moderation queue isn't drowned by bots.
+
+### 8 · End-to-end tests with Playwright
+
+Write the **Playwright** suite the testing module only sketched: drive a real browser through the full publish→read→comment→moderate flow against the running Docker Compose stack, asserting each state transition the acceptance walk described.
+
+## Recap
+
+These eight exercises span the whole stack you built — auth and seeding, MongoDB indexing and pagination, file storage, GraphQL performance, abuse prevention, and end-to-end testing — and several of them close gaps the course named out loud rather than hid, like the missing admin promotion and the `author` N+1. Do a few and DevBlog stops being a tutorial output and starts being *your* project.
+
+Next: [Where to go next →](/devblog/en/wrap-up/next-steps/)

@@ -1,0 +1,34 @@
+---
+title: Where to go next
+description: "DevBlog is project #2 of the six-project Real-World Projects series — where deploying it for real is the CloudDeploy capstone, what the remaining projects (ShopMicro, FitTrack, OfflineNotes, CloudDeploy) cover, and where to find them on the Learn Hub."
+sidebar:
+  order: 3
+---
+
+## You finished project #2
+
+DevBlog is **project #2** of the six-project **Real-World Projects** series on the Learn Hub, and you have now built it end to end. **TaskFlow — project #1 — is already live**: a task and project management app in Node/NestJS with a REST API, PostgreSQL, a React front end, and JWT auth. If you built that one first, you'll recognise the patterns that carried over here — modules, auth, testing — now re-cast against GraphQL, MongoDB, and Next.js instead of REST, SQL, and plain React. That is the whole point of the series: the skills compound from one project to the next.
+
+## Deploying DevBlog for real is CloudDeploy
+
+You may have noticed that DevBlog stops at `docker compose up`. That is a complete *local* stack, but it is not a production deployment — there is no cloud provider, no CI/CD pipeline, no Infrastructure as Code, and no observability. That is deliberate, because **taking an application all the way to production is its own project: CloudDeploy, the capstone (#6)**. When you reach it, DevBlog is one of the applications you'll actually deploy and operate — the multi-stage images and Compose file you finished here are exactly the artifact CloudDeploy picks up and puts on real infrastructure. So the "how do I ship this for real?" question isn't left unanswered; it's answered by a later project in the same series.
+
+## The rest of the series
+
+The series runs in order — **TaskFlow → DevBlog → ShopMicro → FitTrack → OfflineNotes → CloudDeploy** — and here is what remains after DevBlog:
+
+**3 · ShopMicro — next.** An e-commerce backend built as **microservices**: multiple Node services communicating over gRPC and a message broker, each with its own datastore, behind an API gateway. It adapts the Node, Microservices, and Message Queue courses, and introduces service decomposition, inter-service communication, and eventual consistency — the natural step up from DevBlog's single API.
+
+**4 · FitTrack.** A fitness-tracking **mobile** app: a React Native / Expo client with offline-friendly sync against a Node backend, charts, and device APIs. It adapts the React Native and Node courses, and introduces mobile UI, local persistence, and syncing data from a device to a server.
+
+**5 · OfflineNotes.** An **offline-first** notes app: a local-first client (IndexedDB / a sync engine) that works with no network and reconciles changes when connectivity returns, backed by a lightweight Node API. It adapts the Web/PWA and Node courses, and introduces conflict resolution, background sync, and local-first architecture.
+
+**6 · CloudDeploy.** The capstone described above: Infrastructure as Code, CI/CD pipelines, container orchestration, and observability on a cloud provider, tying the series together by deploying and operating what the earlier projects — DevBlog included — built.
+
+## Find them on the Learn Hub
+
+All six projects live in the **Real-World Projects** section of the Learn Hub, alongside the individual courses each one adapts. If a specific piece of DevBlog left you wanting more depth — GraphQL, MongoDB, NestJS, Next.js, Docker — the single-topic course behind that module is the place to go deeper before the next project leans on it. TaskFlow is done and DevBlog is done; ShopMicro is where the series continues.
+
+## Recap
+
+You've completed DevBlog, project #2 of the Real-World Projects series, and you now know where it sits: after TaskFlow (already live) and before ShopMicro, with FitTrack and OfflineNotes further along and CloudDeploy as the capstone — the project where DevBlog and its siblings are actually deployed to the cloud. Everything is on the Learn Hub's Real-World Projects section. Thanks for building DevBlog — go and make it yours.

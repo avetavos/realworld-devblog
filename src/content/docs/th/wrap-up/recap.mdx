@@ -1,0 +1,47 @@
+---
+title: ทบทวน
+description: "ทบทวนทุกอย่างที่ DevBlog สอน — เส้นทางอ่านและเส้นทางเขียน — พร้อมตารางจับคู่โมดูลสร้างทั้งสิบสองกับสิ่งที่คุณได้ฝึกและคอร์สใน Learn Hub ที่แต่ละโมดูลต่อยอด"
+sidebar:
+  order: 1
+---
+
+## What you built
+
+คุณเริ่มจาก repository ว่างเปล่าและจบด้วย headless CMS ที่ทีมเนื้อหาจริง ๆ จำได้: ผู้เขียนล็อกอิน เขียนโพสต์ Markdown ใส่แท็กและเผยแพร่ แล้วตรวจสอบคอมเมนต์ที่ผู้อ่านทิ้งไว้ — และสาธารณะได้อ่านบล็อกที่เร็ว แคชได้ เป็นมิตรกับ SEO ที่ไม่เคยแตะฐานข้อมูลโดยตรง ระหว่างทางคุณไม่ได้แค่ต่อฟีเจอร์เข้าด้วยกัน แต่ได้ฝึกการตัดสินใจที่แยกของเล่นออกจากของที่ส่งมอบได้จริง
+
+ฝั่งแบ็กเอนด์ คุณตั้งแอปพลิเคชัน NestJS ที่มี config แบบมี type และ `AllExceptionsFilter` ระดับ global โมเดลโพสต์ แท็ก ผู้ใช้ และคอมเมนต์เป็น Mongoose document และจัดโค้ดเป็นเลเยอร์แบบโมดูลและ provider แทนที่จะเป็นไฟล์เดียวที่ทำทุกอย่าง คุณเพิ่ม authentication จริง ๆ — รหัสผ่านที่แฮชด้วย bcrypt, JWT ที่ออกและตรวจสอบผ่าน Passport, roles และ guards ที่ตัดสินว่าใครทำอะไรได้ — แล้วเปิดเผยทั้งหมดออกมาเป็น API แบบ **code-first GraphQL** พร้อม resolver สำหรับโพสต์ แท็ก และคอมเมนต์ การทำ pagination และ `@ResolveField author` ที่ resolve ผู้เขียนของแต่ละโพสต์เมื่อถูกร้องขอ คุณให้เนื้อหามีเวิร์กโฟลว์ที่แท้จริง: slug ที่ไม่ซ้ำสร้างโดย `SlugService`, การเปลี่ยนสถานะ draft→publish, คอมเมนต์ที่ตรวจสอบก่อนแสดง และรอบ refactoring ที่มีชื่อซึ่งทิ้งโค้ดไว้ดีกว่าตอนที่เจอ
+
+ฝั่งฟรอนต์เอนด์ คุณสร้างแอปพลิเคชัน Next.js App Router ที่มี client `gqlFetch` แบบมี type, บล็อกสาธารณะแบบ ISR ที่เรนเดอร์ Markdown และส่ง SEO metadata, RSS และ sitemap และ admin dashboard ที่ต้องยืนยันตัวตนพร้อม Markdown editor และคิวตรวจสอบคอมเมนต์ คุณครอบคลุมทั้งสแตกด้วย Jest และ `mongodb-memory-server` ฝั่งแบ็กเอนด์ และ Vitest กับ React Testing Library ฝั่งฟรอนต์เอนด์ และสุดท้ายแพ็กทั้งสามเซอร์วิสเป็น Docker image แบบ multi-stage ที่ขึ้นมาพร้อมกันด้วยคำสั่ง `docker compose up` เดียว
+
+## The two paths: read and write
+
+ถ้าคุณจะจำเรื่องเดียวเกี่ยวกับรูปทรงของ DevBlog ขอให้เป็นเรื่องนี้: มีสองเส้นทางผ่านระบบ และมันตั้งใจให้ต่างกัน
+
+**เส้นทางเขียน (write path)** ต้องยืนยันตัวตนและผ่าน GraphQL mutation ผู้เขียนล็อกอิน API ออก JWT และทุกการเรียก `createPost`, `publishPost`, `addTag` หรือการตรวจสอบคอมเมนต์ต่อจากนั้นพก token นั้นผ่าน guard ที่ตรวจ role ของผู้เขียนก่อนที่ resolver จะทำงานเสียอีก เส้นทางนี้เป็น dynamic โดยธรรมชาติ — มันเปลี่ยนสถานะ ต้องถูกป้องกัน และถูกใช้โดยคนไม่กี่คน ความถูกต้องและการควบคุมการเข้าถึงสำคัญกว่าความเร็วดิบตรงนี้
+
+**เส้นทางอ่าน (read path)** เป็นแบบไม่ระบุตัวตนและปรับให้เหมาะกับการแคช ผู้อ่านไม่เคยยืนยันตัวตนและไม่เคยยิง mutation เขาเข้าถึงหน้า Next.js ที่เรนเดอร์ล่วงหน้าและถูก revalidate ตามกำหนดเวลา (ISR) ซึ่งดึงเนื้อหาที่เผยแพร่แล้วจาก GraphQL API เดียวกันผ่าน query ฝั่งเซิร์ฟเวอร์ เพราะโพสต์ที่เผยแพร่แล้วเปลี่ยนน้อยเมื่อเทียบกับความถี่ที่ถูกอ่าน เส้นทางอ่านจึงแคชได้หนักและเสิร์ฟให้ทุกคนได้เร็ว ในขณะที่เส้นทางเขียนยังคงเป็น dynamic สำหรับคนไม่กี่คนที่เขียน GraphQL schema คือสัญญาเดียวที่นั่งอยู่ระหว่างสองเส้นทาง — API ที่มี type ตัวเดียวกันที่ admin dashboard ยิง mutation ใส่ คือตัวที่บล็อกสาธารณะอ่านจาก — ซึ่งเป็นเหตุผลว่าทำไมการแยกการเขียนออกจากการส่งมอบจึงคุ้มกับชิ้นส่วนที่เพิ่มขึ้น
+
+## Module-by-module recap
+
+ตารางด้านล่างจับคู่โมดูลสร้างทั้งสิบสองกับสิ่งที่คุณได้ฝึกจริง ๆ และคอร์สใน Learn Hub ที่มันต่อยอด
+
+| Module | What you practiced | Learn Hub course it adapts |
+| --- | --- | --- |
+| 1 · Setup & Tooling | วางโครงโมโนรีโป เครื่องมือ และโครง Docker Compose | Node · Docker |
+| 2 · Data Modeling | ออกแบบ schema ของ MongoDB สำหรับโพสต์ แท็ก ผู้ใช้ และคอมเมนต์ | MongoDB |
+| 3 · Backend Foundations | จัดโครงโมดูลและ provider ของ NestJS พร้อม config และ exception filter ระดับ global | Node · Design Patterns |
+| 4 · Authentication | auth แบบ bcrypt + JWT/Passport พร้อม roles และ guards | Node |
+| 5 · GraphQL API | resolver แบบ code-first, pagination และ `@ResolveField author` | GraphQL |
+| 6 · Content Workflow | slug ที่ไม่ซ้ำ การเปลี่ยนสถานะ draft→publish และรอบ refactoring ที่มีชื่อ | Refactoring · Design Patterns |
+| 7 · Comments | โมเดลคอมเมนต์พร้อม flow อนุมัติ/ปฏิเสธแบบตรวจสอบก่อนแสดง | MongoDB · GraphQL |
+| 8 · Frontend Foundations | โปรเจกต์ Next.js App Router และ client `gqlFetch` แบบมี type | Next.js · React |
+| 9 · Public Blog | บล็อกสาธารณะแบบ ISR พร้อมเรนเดอร์ Markdown, SEO, RSS และ sitemap | Next.js |
+| 10 · Admin Dashboard | dashboard ที่ต้องยืนยันตัวตนพร้อม Markdown editor และการตรวจสอบคอมเมนต์ | Next.js · React |
+| 11 · Testing | Jest + `mongodb-memory-server` ฝั่งแบ็กเอนด์, Vitest + RTL ฝั่งฟรอนต์เอนด์ | — |
+| 12 · Docker & Compose | image แบบ multi-stage และสแตก `docker compose up` เต็ม | Docker |
+
+## Recap
+
+DevBlog คือ headless CMS บวกบล็อกสาธารณะ และรูปทรงที่เป็นเอกลักษณ์ของมันคือสองเส้นทางบนสัญญา GraphQL เดียว: เส้นทางเขียนที่ต้องยืนยันตัวตนผ่าน mutation สำหรับคนไม่กี่คนที่เขียน และเส้นทางอ่านแบบ ISR ไม่ระบุตัวตนที่เน้นแคชสำหรับคนจำนวนมากที่อ่าน คุณได้ฝึกการทำ document data modelling, สถาปัตยกรรม NestJS แบบเลเยอร์, auth จริงพร้อม roles และ guards, GraphQL API แบบ code-first ที่มี type, เวิร์กโฟลว์เนื้อหาและการตรวจสอบ, ฟรอนต์เอนด์ Next.js App Router สำหรับทั้งสองกลุ่ม, เทสต์ทั่วทั้งสแตก และการ deploy ด้วย Docker Compose คำสั่งเดียว บทเรียนถัดไปให้แนวทางในการดันแต่ละอย่างให้ไกลกว่านี้
+
+ถัดไป: [แบบฝึกหัดต่อยอด →](/devblog/th/wrap-up/exercises/)
