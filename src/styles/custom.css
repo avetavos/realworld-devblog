@@ -1,0 +1,7 @@
+:root { --sl-color-accent: #E5484D; --sl-color-accent-low: #3a1113; --sl-color-accent-high: #f6c6c7; }
+.stack-badges { display:flex; gap:.4rem; flex-wrap:wrap; margin:1rem 0; }
+.stack-badges span { font-size:.75rem; border:1px solid var(--sl-color-gray-5); border-radius:999px; padding:.1rem .6rem; }
+
+/* Mermaid diagrams (rendered client-side by /devblog/mermaid-init.js) */
+.mermaid { display: flex; justify-content: center; margin: 1.5rem 0; }
+.mermaid svg { max-width: 100%; height: auto; }

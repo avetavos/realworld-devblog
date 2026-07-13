@@ -1,0 +1,11 @@
+{
+  // Cloudflare Worker (static assets) for the DevBlog guide.
+  // The site is built with Astro `base: '/devblog'`, so the built files must be
+  // served under a `/devblog/` path. `npm run deploy` stages `dist/` into
+  // `.cf-assets/devblog/` and serves `.cf-assets` as the asset root.
+  "name": "realworld-devblog",
+  "compatibility_date": "2024-09-23",
+  "assets": {
+    "directory": "./.cf-assets"
+  }
+}
