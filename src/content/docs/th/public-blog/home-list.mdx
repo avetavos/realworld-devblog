@@ -1,0 +1,142 @@
+---
+title: The home list
+description: "สร้าง app/page.tsx เป็น Server Component ที่เรียก gqlFetch ดึงโพสต์ที่ publish แล้วพร้อม ISR, เรนเดอร์เป็น grid ของ PostCard, และแบ่งหน้าด้วย search param ?page="
+sidebar:
+  order: 1
+---
+
+## What we're building
+
+`apps/web/app/page.tsx` ของจริง: Server Component ที่เรียก `gqlFetch` หาโพสต์ที่ publish แล้วด้วย `revalidate: 60` เรนเดอร์ผ่าน [PostCard](/devblog/th/frontend-foundations/styling/) เป็น grid และอ่าน search param `?page=` สำหรับการแบ่งหน้าแบบง่าย ๆ ควบคู่กันไป `apps/web/components/PostGrid.module.css` — สอง class เล็ก ๆ ที่หน้านี้ต้องการคือ `.grid` และ `.pagination` ซึ่ง [Tag pages](/devblog/th/public-blog/tag-pages/) เอาไปใช้ซ้ำโดยไม่ต้องประกาศซ้ำ นี่คือการแทนที่ `<ul>` รายชื่อโพสต์ชั่วคราวที่ [GraphQL client & auth](/devblog/th/frontend-foundations/graphql-client/) และ [Styling](/devblog/th/frontend-foundations/styling/) ต่างวางไว้ใน `page.tsx` ชั่วคราวแค่เพื่อพิสูจน์ว่า `gqlFetch` และ `PostCard` ทำงานได้แยกส่วนกัน
+
+## Why
+
+ทุกหน้าที่คอร์สนี้เคยเรียกดึงข้อมูลมาก่อนหน้านี้ใช้ `page: 1` แบบ hardcode ตัวเดียวเท่านั้น หน้า home list ของจริงต้องการเลขหน้าจริง ๆ และคำตอบของ App Router คือ `searchParams` — กลไกเดียวกับที่ `params` ให้กับ dynamic route segment แต่เป็นสำหรับ query string ของ URL แทน ในเวอร์ชันของ Next.js ที่คอร์สนี้ใช้ ทั้ง `params` และ `searchParams` มาในรูป `Promise` ที่ Server Component ต้อง `await` ก่อนอ่านค่า `HomePage` `await` `searchParams` ดึง `page` ออกมา แล้ว fallback เป็น `1` ด้วย `Math.max(1, Number(pageParam) || 1)` — `Number(undefined)` คือ `NaN`, `Number('abc')` ก็เป็น `NaN` เช่นกัน ส่วน `Number('0')` หรือ `Number('-3')` เป็นตัวเลขจริงที่ต่ำกว่า `1` ดังนั้น guard ต้องดักทั้งสามกรณีพร้อมกัน ไม่ใช่แค่กรณีที่ไม่มีค่าส่งมา
+
+`revalidate: 60` คือเรื่องทั้งหมดของ ISR สำหรับหน้านี้: request แรกหลังจากสำเนาที่แคชไว้อายุครบ 60 วินาที ยังได้สำเนาเก่านั้นกลับไปทันที — ไม่มี request ไหนต้องรอการ regenerate สด ๆ เลย — ในขณะที่ Next เริ่ม fetch ใหม่ใน background request ถัดไปหลังจากที่ background fetch นั้นเสร็จแล้วถึงจะได้ข้อมูลใหม่ ทุก request ระหว่างนั้นยังเห็นข้อมูลเก่าอยู่ นั่นคือโมเดล stale-while-revalidate ที่ option `next: { revalidate, tags }` ของ `gqlFetch` ถูกสร้างไว้ให้เลือกเข้าร่วมใน [GraphQL client & auth](/devblog/th/frontend-foundations/graphql-client/) และมันต่างจากสิ่งที่ Verify section ของทุกโมดูลก่อนหน้าทำจริง ๆ: โมดูลเหล่านั้นเรียก `gqlFetch` โดยไม่ส่ง `revalidate` เลย ซึ่งตกไปที่ `cache: 'no-store'` — การยิง network ไปที่ API จริง ๆ ทุกครั้งที่มี request ซึ่งเป็นค่าเริ่มต้นที่ถูกต้องสำหรับการพิสูจน์ว่า fetch ทำงาน ไม่ใช่สำหรับหน้าที่ผู้เข้าชมจริงจะโหลดซ้ำ ๆ
+
+`tags: ['posts']` ยังไม่ได้ทำอะไรด้วยตัวมันเอง — ยังไม่มีโค้ดที่ไหนเรียก `revalidateTag('posts')` เพื่อบังคับให้หน้านี้สดใหม่ตามต้องการ นั่นคือช่องว่างจริง ๆ ที่ตั้งใจบอกไว้: ที่ที่เหมาะกับมันคือตอนที่ admin publish หรือ unpublish โพสต์ แต่ dashboard ของ [Admin](/devblog/th/admin/) (Module 10) เรียก NestJS API ตรงจาก browser ผ่าน `gqlFetch` แบบเดียวกับที่ token helper ของ `lib/auth.ts` ทำ — ไม่มี Next.js Server Action หรือ Route Handler ใน write path ให้ `revalidateTag` อาศัยอยู่เลย จนกว่าจะมีสิ่งนั้น ทุกการ publish จะปรากฏใน home list ก็ต่อเมื่อหน้าต่าง 60 วินาทีหมดอายุตามธรรมชาติเท่านั้น ไม่เร็วกว่านั้น tag ถูกตั้งไว้แล้วเพื่อให้โค้ดในอนาคตมีอะไรให้เรียก `revalidateTag` ด้วย แค่ยังไม่มีอะไรเรียกมันตอนนี้
+
+## Pros & cons
+
+**ISR ด้วย `revalidate: 60` (ที่เราใช้) เทียบกับ SSR เต็มรูปแบบ (`cache: 'no-store'`) เทียบกับ SSG แบบ static (ไม่มี `revalidate` เลย)** SSR เต็มรูปแบบ — สิ่งที่ `page.tsx` ชั่วคราวของทุกโมดูลก่อนหน้าทำ — รับประกันว่าผู้เข้าชมทุกคนเห็นข้อมูลที่เก่าที่สุดแค่หนึ่ง network round trip โดยแลกกับการจ่ายค่า round trip นั้นทุกครั้ง สำหรับผู้เข้าชมทุกคน มันยังเสิร์ฟจาก CDN edge cache ไม่ได้เลยด้วย เพราะ Next ต้องรัน Server Component สด ๆ ต่อ request SSG แบบ static — การ pre-render หน้านี้ครั้งเดียวตอน build โดยไม่มี `revalidate` key แล้วไม่แตะ API อีกเลยจนกว่าจะ deploy รอบถัดไป — เป็นตัวเลือกที่เร็วและถูกที่สุดอย่างชัดเจน เสิร์ฟตรงจาก static output โดยไม่มีงานฝั่งเซิร์ฟเวอร์ต่อ request เลย แต่โพสต์ที่เพิ่ง publish จะไม่มีอยู่บนหน้านี้จนกว่าจะมีใคร rerun build ใหม่ สำหรับบล็อกที่ทั้งจุดประสงค์คือการ publish โพสต์ใหม่ นั่นคือข้อตัดสิทธิ์เว้นแต่จะต่อ webhook rebuild-on-publish ไว้ ซึ่งคอร์สนี้ไม่ได้สร้าง ISR อยู่ตรงกลางระหว่างสองแบบ: เร็วเกือบเท่า SSG สำหรับเกือบทุก request เพราะ cache hit ไม่เสียอะไรเลยนอกจากการเสิร์ฟ HTML ที่เก็บไว้ แต่ถูกจำกัดไว้ที่ความเก่าไม่เกิน 60 วินาที แทนที่จะวัดความเก่าเป็นจำนวนรอบ deploy — เป็นการแลกที่ถูกต้องสำหรับหน้า home ของบล็อกที่ไม่จำเป็นต้องเร็วในทันที แต่ต้องตามทันได้เองในที่สุด โดยไม่ต้องมีใครไปดูแล
+
+## Set it up
+
+สร้าง `apps/web/components/PostGrid.module.css`:
+
+```css
+.grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(280px, 1fr));
+  gap: var(--space-6);
+}
+
+.pagination {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-top: var(--space-8);
+  font-size: var(--text-sm);
+  color: var(--color-muted);
+}
+```
+
+แทนที่ `apps/web/app/page.tsx` ด้วย home list ของจริง:
+
+```tsx
+import Link from 'next/link';
+import { gqlFetch } from '@/lib/graphql';
+import type { PostPage } from '@/lib/graphql';
+import { PostCard } from '@/components/PostCard';
+import styles from '@/components/PostGrid.module.css';
+
+const PAGE_SIZE = 10;
+
+const POSTS_QUERY = `
+  query Posts($status: PostStatus, $page: Int, $pageSize: Int) {
+    posts(status: $status, page: $page, pageSize: $pageSize) {
+      items {
+        id
+        title
+        slug
+        excerpt
+        coverImage
+        tags
+        publishedAt
+        author {
+          displayName
+        }
+      }
+      total
+      page
+      pageSize
+    }
+  }
+`;
+
+interface HomePageProps {
+  searchParams: Promise<{ page?: string }>;
+}
+
+export default async function HomePage({ searchParams }: HomePageProps) {
+  const { page: pageParam } = await searchParams;
+  const page = Math.max(1, Number(pageParam) || 1);
+
+  const { posts } = await gqlFetch<{ posts: PostPage }>(
+    POSTS_QUERY,
+    { status: 'PUBLISHED', page, pageSize: PAGE_SIZE },
+    { revalidate: 60, tags: ['posts'] },
+  );
+
+  const totalPages = Math.max(1, Math.ceil(posts.total / posts.pageSize));
+
+  return (
+    <>
+      <div className={styles.grid}>
+        {posts.items.map((post) => (
+          <PostCard key={post.id} post={post} />
+        ))}
+      </div>
+      <nav className={styles.pagination}>
+        {page > 1 && <Link href={`/?page=${page - 1}`}>← Newer</Link>}
+        <span>
+          Page {page} of {totalPages}
+        </span>
+        {page < totalPages && <Link href={`/?page=${page + 1}`}>Older →</Link>}
+      </nav>
+    </>
+  );
+}
+```
+
+- **`searchParams: Promise<{ page?: string }>`** — search param ของ URL เป็น string เสมอ (หรือไม่มีเลย) เท่าที่ Next รับรู้ `?page=2` มาในรูป `{ page: '2' }` ไม่เคยเป็น `{ page: 2 }` การแปลงเป็นตัวเลขเป็นหน้าที่ของ component นี้ ไม่ใช่ของ framework
+- **`Math.max(1, Number(pageParam) || 1)`** — `Number(pageParam) || 1` แปลง param ที่ไม่มี, ไม่ใช่ตัวเลข, หรือเป็น `0` ให้กลายเป็น `1` ส่วน `Math.max(1, ...)` ด้านนอกดักตัวเลขที่ syntax ถูกต้องแต่ติดลบ (`?page=-5`) ที่ `||` เพียงอย่างเดียวดักไม่ได้ ไม่มี guard ตัวไหนพอตัวเดียวเลย
+- **`status: 'PUBLISHED'`** ถูกส่งมาอย่างชัดเจน ตรงกับ convention ของทุกโมดูลก่อนหน้า แม้ว่า [Posts resolver](/devblog/th/graphql-api/posts-resolver/) จะ default อาร์กิวเมนต์ `status` ที่ไม่ได้ส่งมาให้เป็น published สำหรับ caller ที่ไม่ได้ authenticate อยู่แล้วก็ตาม — การพูดชัดเจนตรงนี้ไม่เสียอะไรเลย และหมายความว่า query นี้อ่านเหมือนเดิมไม่ว่า default ฝั่ง API จะเป็นอะไรก็ตาม
+- **`{ revalidate: 60, tags: ['posts'] }`** คือการเรียกเดียวในไฟล์นี้ที่เลือกเข้าร่วม ISR จริง ๆ — ที่อื่นในคอร์สนี้ `gqlFetch` ถูกเรียกโดยไม่ส่ง argument ตัวที่สามเลย (ตกไปที่ `cache: 'no-store'`) หรือไม่ก็อยู่ใน mutation ที่การแคชจะผิดอยู่ดีไม่ว่าอะไรก็ตาม
+- **`totalPages`** มาจาก `posts.total` และ `posts.pageSize` ทั้งคู่ที่ได้กลับมาจาก API ใน request นี้เอง ไม่มีอะไรในนี้ hardcode `PAGE_SIZE` ซ้ำสองครั้ง หรือสมมติว่า API กับ client เห็นตรงกันเรื่อง page size โดย convention แทนที่จะอ่านจาก response จริง
+
+## Verify
+
+ให้ API รันอยู่และมีโพสต์ที่ publish แล้วอย่างน้อยสองหน้า (10+ จาก Verify section ของโมดูลก่อนหน้า หรือสร้างเพิ่มผ่าน Sandbox) แล้วเริ่ม dev server:
+
+```bash
+cd apps/web
+npm run dev
+```
+
+เปิด `http://localhost:3000` — ควรเห็น grid แบบ responsive ของ `PostCard` หนึ่งใบต่อโพสต์ที่ publish แล้วในหน้า 1 และ — ถ้ามีมากกว่าหนึ่งหน้า — ลิงก์ "Older →" คลิกมัน แล้วยืนยันว่า URL กลายเป็น `http://localhost:3000/?page=2` และมีชุดโพสต์ที่ต่างออกไปเรนเดอร์
+
+ตอนนี้พิสูจน์ว่าหน้าต่าง ISR เป็นของจริง publish โพสต์ใหม่ผ่าน Sandbox (mutation `createPost` ตามด้วย `publishPost` จาก [Content Workflow](/devblog/th/content-workflow/draft-publish/)) แล้ว reload `http://localhost:3000` ทันที — โพสต์ใหม่**ไม่ควร**ปรากฏยัง เพราะสำเนาที่แคชไว้ยังไม่ถึง 60 วินาที รอเกินหนึ่งนาทีเล็กน้อย reload อีกครั้ง แล้วมันควรปรากฏในครั้งนี้ พิสูจน์ว่า `revalidate: 60` จำกัดความเก่าไว้จริง ไม่ใช่แคชหน้าตลอดไปหรือไม่แคชเลย
+
+```txt
+t=0s    publish a new post through the Sandbox
+t=5s    reload localhost:3000  → new post absent (cache still fresh)
+t=65s   reload localhost:3000  → new post present (cache regenerated)
+```
+
+## Recap
+
+`apps/web/app/page.tsx` ตอนนี้คือ home list ของจริง: Server Component ที่ `await` `searchParams` หาค่า `?page=` เรียก `gqlFetch` ด้วย `status: 'PUBLISHED'` และ `page`/`pageSize` ที่ชัดเจน แล้วเลือกเข้าร่วม ISR ด้วย `{ revalidate: 60, tags: ['posts'] }` — การเรียกแรกในคอร์สนี้ที่ใช้ option นั้นจริง ๆ แทนที่จะตกไปที่ `cache: 'no-store'` การแลก trade-off ของ ISR เทียบกับ SSR เต็มรูปแบบและ SSG แบบ static ถูกพูดออกมาชัดเจน: ความเก่าที่ถูกจำกัดไว้ แทนที่จะเป็นความเก่าเป็นศูนย์ (ต้นทุนของ SSR) หรือความเก่าที่วัดเป็นจำนวนรอบ deploy (ต้นทุนของ SSG) — และ cache tag `tags: ['posts']` ถูกตั้งไว้โดยยังไม่มีใครเรียก `revalidateTag` เลย เป็นช่องว่างที่พูดตรง ๆ ที่คอร์สนี้เหลือไว้ให้ [Admin](/devblog/th/admin/) ปิดในที่สุด
+
+ถัดไป: [Post page →](/devblog/th/public-blog/post-page/)

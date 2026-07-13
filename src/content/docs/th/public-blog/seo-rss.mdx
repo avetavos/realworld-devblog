@@ -1,0 +1,287 @@
+---
+title: SEO, RSS & sitemap
+description: "เพิ่ม generateMetadata ให้หน้า home และแต่ละโพสต์, RSS feed ที่ app/rss.xml/route.ts, และ app/sitemap.ts แบบ dynamic ที่สร้างจากโพสต์และ tag ที่ publish แล้ว"
+sidebar:
+  order: 4
+---
+
+## What we're building
+
+`generateMetadata` ที่เพิ่มเข้าไปใน `apps/web/app/page.tsx` และ `apps/web/app/posts/[slug]/page.tsx` — file convention ของ App Router สำหรับ `<title>`, `<meta name="description">`, และ Open Graph tag แบบต่อ route `apps/web/app/rss.xml/route.ts` — Route Handler ที่สร้าง RSS 2.0 XML feed ด้วยมือจากโพสต์ที่ publish ล่าสุด `apps/web/app/sitemap.ts` — convention sitemap ของ App Router ที่แสดงหน้า home, tags index, ทุกโพสต์ที่ publish แล้ว, และทุก tag environment variable ใหม่หนึ่งตัว `NEXT_PUBLIC_SITE_URL` รองรับทั้งสามอย่างนี้ เพราะไม่มีอันไหนสร้าง absolute URL จาก relative path แบบที่ `<Link>` ทำได้เลย
+
+## Why
+
+ทุกที่อื่นในคอร์สนี้ metadata ของหน้าเป็นแค่สิ่งที่ object `export const metadata` แบบ static ของ `apps/web/app/layout.tsx` บอกไว้ — "DevBlog" เหมือนกันทุกครั้ง ในทุก route `generateMetadata` คือเวอร์ชัน dynamic ของ convention เดียวกันนั้น: ฟังก์ชัน `async` ที่หน้าหนึ่ง export ควบคู่ไปกับ component default ของมัน คืนค่า object `Metadata` ที่ Next อ่านแล้ว inject เข้าไปใน `<head>` เอง แบบเดียวกับที่ static `metadata` export เคยทำมาตลอด หน้าหนึ่งจะ export อย่างใดอย่างหนึ่งเท่านั้น ไม่เคยทั้งสองอย่างพร้อมกัน
+
+เวอร์ชันของหน้า home ไม่ต้อง fetch อะไรเลยด้วยซ้ำ — title ของมันขึ้นอยู่กับว่า `searchParams` ขอผลลัพธ์หน้าไหนเท่านั้น ซึ่งมันรู้อยู่แล้วโดยไม่ต้องแตะ API:
+
+```tsx
+const title = page === 1 ? 'DevBlog' : `DevBlog — Page ${page}`;
+```
+
+เวอร์ชันของหน้าโพสต์เป็นกรณีที่น่าสนใจกว่า เพราะมันต้องการข้อมูลโพสต์ตัวเดียวกันเป๊ะกับที่ body ของ `PostPage` เองดึงมาอยู่แล้ว — ชื่อเรื่อง, excerpt สำหรับ description, รูปปกสำหรับ Open Graph ตัวเลือกที่ดูตรงไปตรงมาที่สุดคือ query ที่สองที่เล็กกว่า ขอแค่ฟิลด์เหล่านั้น บทเรียนนี้ตั้งใจทำตรงกันข้าม: `generateMetadata` เรียก `gqlFetch` ด้วย `POST_QUERY` string *เดียวกันเป๊ะ*, ตัวแปร `{ slug }` เดียวกันเป๊ะ, และ option `{ revalidate: 60, tags: [...] }` เดียวกันเป๊ะกับที่ `PostPage` เองใช้ [Reference > Returns](https://github.com/vercel/next.js/blob/canary/docs/01-app/03-api-reference/04-functions/generate-metadata.mdx) บันทึกไว้ว่าทำไมนั่นไม่ใช่การซ้ำซ้อนที่เสียเปล่า: "fetch requests are automatically memoized for the same data across `generateMetadata`, `generateStaticParams`, Layouts, Pages, and Server Components" Next dedupe การเรียก `fetch` ที่เหมือนกันที่เกิดขึ้นระหว่างการเรนเดอร์เดียวกัน โดยจับคู่จาก URL และ option ของ request — รวมถึง POST body ด้วย ซึ่งเป็นที่ที่เนื้อหาจริงของ query GraphQL อยู่ query string ที่ต่างกันสองตัว แม้จะขอฟิลด์ที่ทับซ้อนกันก็ตาม จะดูเหมือน request สองตัวที่ต่างกันและเสีย network round trip จริงสองครั้ง ส่วน query string เดียวกันที่ถูกเรียกจากสองฟังก์ชันต่างกันคือ request เดียว ที่เสิร์ฟให้ทั้งคู่
+
+`app/rss.xml/route.ts` เป็น Route Handler ไม่ใช่หน้า — convention ของ App Router สำหรับ route ที่คืนค่าอย่างอื่นที่ไม่ใช่ HTML แบบเดียวกับที่ Verify section ของ `moderateComment` ใน Comments API คืน JSON ดิบแทนที่จะเป็นหน้าที่เรนเดอร์แล้ว ตั้งแต่ Next.js 15 เป็นต้นมา Route Handler แบบ `GET` จะ**ไม่**ถูกแคชโดย default อีกต่อไปแบบที่เคยเป็น — ทุก request รันฟังก์ชันใหม่ — แต่นั่นเป็นชั้นที่แยกจาก Data Cache ที่ option `revalidate` ของ `gqlFetch` ควบคุมอยู่แล้ว การส่ง `{ revalidate: 300, tags: ['posts'] }` เข้าไปใน `gqlFetch` ตรงนี้หมายความว่า fetch GraphQL ที่อยู่ข้างใต้ยังถูกแคชไว้ห้านาที ฟังก์ชัน Route Handler เองรันทุก request แต่ส่วนใหญ่ของการรันเหล่านั้นแค่จัดรูปแบบ response ที่แคชไว้แล้วให้เป็น XML ไม่ได้เสีย network round trip สดใหม่ไปที่ API ทุกครั้ง ตัวเลือกที่เข้มงวดกว่า — `export const dynamic = 'force-static'` — จะแคช XML response ที่เรนเดอร์แล้วทั้งหมดด้วย ข้ามแม้แต่ขั้นตอนจัดรูปแบบใหม่ โดยแลกกับการที่ route จะอ่านอะไรที่เฉพาะเจาะจงกับ request ไม่ได้อีกต่อไป (ซึ่ง route นี้ไม่เคยทำอยู่แล้ว) บทเรียนนี้ปล่อยให้มันเป็นการปรับให้เข้มงวดขึ้นแบบ optional ที่ตั้งชื่อไว้ แทนที่จะเป็น default เพื่อให้ความต่างระหว่าง Data Cache กับ route cache ยังมองเห็นได้ แทนที่จะถูกซ่อนไว้หลัง config บรรทัดเดียว
+
+`sitemap.ts` เป็น metadata file convention อีกแบบหนึ่ง — ไม่ใช่ Route Handler แต่เป็นไฟล์พิเศษที่ Next รู้จักจากชื่อและ compile เป็น response `/sitemap.xml` ให้เอง แคชแบบเดียวกับที่ข้อมูลของ Server Component ถูกแคชโดย default เพราะไฟล์นี้เรียก `gqlFetch` หาข้อมูลโพสต์และ tag สด ๆ มันจึง export `revalidate` ของตัวเอง — การตั้งค่าระดับ route-segment ที่แยกจาก (และซ้อนทับบน) `revalidate` ที่ส่งเข้าไปใน `gqlFetch` เองอยู่แล้ว การแยกสองชั้นเดียวกับที่ `rss.xml` เพิ่งวางไว้
+
+## Pros & cons
+
+**RSS XML ที่สร้างด้วยมือผ่าน template string (บทเรียนนี้) เทียบกับ npm package `feed`** library สร้าง feed โดยเฉพาะ validate รายละเอียด spec ของ RSS/Atom/JSON Feed ให้ — namespace ที่ถูกต้อง, ฟิลด์ optional อย่าง `<author>` หรือ `<category>` ที่ต่อสายผ่าน builder API แบบ typed, และรองรับ feed format หลายแบบจาก input เดียว โดยแลกกับ dependency อีกตัวสำหรับสิ่งที่ข้างใต้ก็ยังเป็นแค่การจัดรูปแบบ string feed ของ `rss.xml` ตรงนี้ตั้งใจให้เล็ก: title, link, `pubDate`, และ description ที่ escape ต่อ item หนึ่งตัว escape ด้วยมือด้วย helper `escapeXml` เล็ก ๆ ตัวเดียว แทนที่จะเป็น escaping logic ของ library เอง นั่นคือขนาดที่เหมาะสมสำหรับ feed จริงของ DevBlog การเผยแพร่จริงที่ส่ง Atom ควบคู่กับ RSS หรือ tag `<enclosure>` สำหรับตอนพอดแคสต์ จะคุ้มค่ากับ dependency ที่บทเรียนนี้ข้ามไป
+
+**convention `app/sitemap.ts` แบบ dynamic ผ่านโค้ด (บทเรียนนี้) เทียบกับ `public/sitemap.xml` แบบ static ที่สร้างโดยเครื่องมือตอน build อย่าง `next-sitemap`** เครื่องมือตอน build รันครั้งเดียวเป็นส่วนหนึ่งของ `next build` เดินผ่าน route manifest ที่ compile แล้วแล้วเขียนไฟล์ static ธรรมดา — ง่าย และถูกต้องสำหรับไซต์ที่ชุด URL ทั้งหมดรู้ได้ก่อนที่ request ใด ๆ จะมาถึง ชุด URL ของ DevBlog ไม่ได้รู้ได้แบบนั้น: ทุกโพสต์ที่ publish แล้วและทุก tag เป็น URL ที่ `sitemap.ts` ต้องแจกแจงด้วยการ query API จริง ๆ ข้อจำกัดเดียวกับที่ "SSG แบบ static ไม่รู้จักโพสต์ใหม่" ที่ Pros & cons section ของ [The home list](/devblog/th/public-blog/home-list/) เองตั้งชื่อไว้แล้วสำหรับหน้า home เอง convention `sitemap.ts` แบบผ่านโค้ดมีอยู่เพื่อกรณีนี้เป๊ะ ๆ — มัน `await gqlFetch(...)` ได้แบบเดียวกับ Server Component ไหนก็ตาม และ re-run เป็นระยะผ่าน `revalidate` export ของตัวมันเอง แทนที่จะแค่ตอน build เท่านั้น
+
+## Set it up
+
+เพิ่ม environment variable ใหม่ใน `apps/web/.env.local` ถัดจาก `NEXT_PUBLIC_API_URL`:
+
+```bash
+NEXT_PUBLIC_SITE_URL=http://localhost:3000
+```
+
+อัปเดต `apps/web/app/page.tsx` เพิ่ม `generateMetadata` ไว้เหนือฟังก์ชัน `HomePage` ที่มีอยู่ (import อื่น, `POSTS_QUERY`, `PAGE_SIZE`, `HomePageProps`, และ `HomePage` เองของไฟล์ไม่เปลี่ยนจาก [The home list](/devblog/th/public-blog/home-list/)):
+
+```tsx
+import type { Metadata } from 'next';
+
+const SITE_URL = process.env.NEXT_PUBLIC_SITE_URL!;
+
+export async function generateMetadata({ searchParams }: HomePageProps): Promise<Metadata> {
+  const { page: pageParam } = await searchParams;
+  const page = Math.max(1, Number(pageParam) || 1);
+  const title = page === 1 ? 'DevBlog' : `DevBlog — Page ${page}`;
+
+  return {
+    title,
+    description: 'A small, real GraphQL-backed blog built with Next.js and NestJS.',
+    openGraph: {
+      title,
+      url: page === 1 ? SITE_URL : `${SITE_URL}/?page=${page}`,
+    },
+  };
+}
+```
+
+อัปเดต `apps/web/app/posts/[slug]/page.tsx` เพิ่ม `generateMetadata` ไว้เหนือ `generateStaticParams` (ที่เหลือทั้งหมดในไฟล์ไม่เปลี่ยนจาก [Post page](/devblog/th/public-blog/post-page/)):
+
+```tsx
+import type { Metadata } from 'next';
+
+const SITE_URL = process.env.NEXT_PUBLIC_SITE_URL!;
+
+export async function generateMetadata({ params }: PostPageProps): Promise<Metadata> {
+  const { slug } = await params;
+  const { post } = await gqlFetch<{ post: PostWithComments | null }>(
+    POST_QUERY,
+    { slug },
+    { revalidate: 60, tags: [`post:${slug}`] },
+  );
+
+  if (!post || post.status !== 'published') {
+    return { title: 'Post not found' };
+  }
+
+  return {
+    title: post.title,
+    description: post.excerpt,
+    openGraph: {
+      title: post.title,
+      description: post.excerpt,
+      url: `${SITE_URL}/posts/${slug}`,
+      images: post.coverImage ? [post.coverImage] : undefined,
+      type: 'article',
+      publishedTime: post.publishedAt,
+    },
+  };
+}
+```
+
+สร้าง `apps/web/app/rss.xml/route.ts`:
+
+```ts
+import { gqlFetch } from '@/lib/graphql';
+import type { Post } from '@/lib/graphql';
+
+const SITE_URL = process.env.NEXT_PUBLIC_SITE_URL!;
+
+const RSS_POSTS_QUERY = `
+  query RssPosts($status: PostStatus, $page: Int, $pageSize: Int) {
+    posts(status: $status, page: $page, pageSize: $pageSize) {
+      items {
+        title
+        slug
+        excerpt
+        publishedAt
+      }
+    }
+  }
+`;
+
+interface RssData {
+  posts: {
+    items: Pick<Post, 'title' | 'slug' | 'excerpt' | 'publishedAt'>[];
+  };
+}
+
+function escapeXml(value: string): string {
+  return value
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&apos;');
+}
+
+export async function GET(): Promise<Response> {
+  const { posts } = await gqlFetch<RssData>(
+    RSS_POSTS_QUERY,
+    { status: 'PUBLISHED', page: 1, pageSize: 50 },
+    { revalidate: 300, tags: ['posts'] },
+  );
+
+  const items = posts.items
+    .map((post) => {
+      const link = `${SITE_URL}/posts/${post.slug}`;
+      const pubDate = post.publishedAt
+        ? `\n      <pubDate>${new Date(post.publishedAt).toUTCString()}</pubDate>`
+        : '';
+      const description = post.excerpt
+        ? `\n      <description>${escapeXml(post.excerpt)}</description>`
+        : '';
+      return `
+    <item>
+      <title>${escapeXml(post.title)}</title>
+      <link>${link}</link>
+      <guid>${link}</guid>${pubDate}${description}
+    </item>`;
+    })
+    .join('');
+
+  const xml = `<?xml version="1.0" encoding="UTF-8"?>
+<rss version="2.0">
+  <channel>
+    <title>DevBlog</title>
+    <link>${SITE_URL}</link>
+    <description>A small, real GraphQL-backed blog built with Next.js and NestJS.</description>${items}
+  </channel>
+</rss>`;
+
+  return new Response(xml, {
+    headers: {
+      'Content-Type': 'application/rss+xml',
+      'Cache-Control': 's-maxage=300, stale-while-revalidate',
+    },
+  });
+}
+```
+
+สร้าง `apps/web/app/sitemap.ts`:
+
+```ts
+import type { MetadataRoute } from 'next';
+import { gqlFetch } from '@/lib/graphql';
+import type { Post, Tag } from '@/lib/graphql';
+
+const SITE_URL = process.env.NEXT_PUBLIC_SITE_URL!;
+
+const SITEMAP_QUERY = `
+  query SitemapData($status: PostStatus, $page: Int, $pageSize: Int) {
+    posts(status: $status, page: $page, pageSize: $pageSize) {
+      items {
+        slug
+        publishedAt
+      }
+    }
+    tags {
+      slug
+    }
+  }
+`;
+
+interface SitemapData {
+  posts: {
+    items: Pick<Post, 'slug' | 'publishedAt'>[];
+  };
+  tags: Pick<Tag, 'slug'>[];
+}
+
+export const revalidate = 3600;
+
+export default async function sitemap(): Promise<MetadataRoute.Sitemap> {
+  const { posts, tags } = await gqlFetch<SitemapData>(SITEMAP_QUERY, {
+    status: 'PUBLISHED',
+    page: 1,
+    pageSize: 100,
+  });
+
+  const postEntries: MetadataRoute.Sitemap = posts.items.map((post) => ({
+    url: `${SITE_URL}/posts/${post.slug}`,
+    lastModified: post.publishedAt ? new Date(post.publishedAt) : undefined,
+    changeFrequency: 'weekly',
+    priority: 0.7,
+  }));
+
+  const tagEntries: MetadataRoute.Sitemap = tags.map((tag) => ({
+    url: `${SITE_URL}/tags/${tag.slug}`,
+    changeFrequency: 'weekly',
+    priority: 0.5,
+  }));
+
+  return [
+    { url: SITE_URL, changeFrequency: 'daily', priority: 1 },
+    { url: `${SITE_URL}/tags`, changeFrequency: 'weekly', priority: 0.6 },
+    ...postEntries,
+    ...tagEntries,
+  ];
+}
+```
+
+- **`generateMetadata` และ `PostPage` เรียก `POST_QUERY` เดียวกันเป๊ะ** คือประเด็นที่ Why section พูดไว้กลายเป็นโค้ดจริง — copy query string, ตัวแปร, และ option มาเป๊ะ ๆ แทนที่จะเขียนอีกตัวที่แคบกว่า เพื่อให้ request memoization ของ Next รวมมันเป็น fetch เดียวได้จริง
+- **`generateMetadata` ของหน้า home ไม่ต้องเรียก `gqlFetch` เลย** — ความต่างที่ตั้งใจเทียบกับเวอร์ชันของหน้าโพสต์ ใส่ไว้เพื่อแสดงว่า dynamic metadata ไม่ได้แปลว่าต้อง fetch ข้อมูลเสมอไป บางครั้ง route param หรือ search param เพียงอย่างเดียวก็พอแล้ว
+- **`RssData` และ `SitemapData`** เป็น interface ในไฟล์เอง รูปแบบเดียวกับที่ `PostWithComments` ใช้ใน [Post page](/devblog/th/public-blog/post-page/) — แต่ละตัวมีรูปร่างตรงกับสิ่งที่ query ของตัวเอง select ไว้เป๊ะ ไม่ได้ขยายมาจาก type ที่ใช้ร่วมกันที่มีฟิลด์ที่ไฟล์นี้ไม่เคยขอ
+- **`pageSize: 100` ใน `sitemap.ts`** คือขีดจำกัดที่ตั้งชื่อไว้เหมือนกันเป๊ะกับที่ `generateStaticParams` ยอมรับใน [Post page](/devblog/th/public-blog/post-page/) ด้วยเหตุผลเดียวกันเป๊ะ — มีแค่ 100 โพสต์ที่ publish แล้วตัวแรกและทุก tag (สมมติว่าพอดีในหน้าเดียวได้สบาย ๆ ตาม "collection ทั้งหมดคาดว่าจะเล็ก" ของ [Tags resolver](/devblog/th/graphql-api/tags-resolver/)) ที่ถูกรวมไว้
+- **`export const revalidate = 3600`** ควบคุมว่า Next รัน `sitemap()` เองบ่อยแค่ไหน แยกจากการแคชของการเรียก `gqlFetch` เองข้างใน — ประเด็น two-cache-layers เดียวกับที่ Why paragraph ของ `rss.xml` เพิ่งเดินผ่านไป
+
+## Verify
+
+```bash
+cd apps/web
+npm run dev
+```
+
+View source บน `http://localhost:3000` และหน้าโพสต์หนึ่งหน้า — ยืนยันว่า `<title>` แสดง "DevBlog" และชื่อโพสต์จริงตามลำดับ และมี tag `<meta property="og:title" ...>` อยู่ เปลี่ยน URL เป็น `http://localhost:3000/?page=2` แล้วยืนยันว่า title กลายเป็น "DevBlog — Page 2"
+
+```bash
+curl -s http://localhost:3000/rss.xml | head -20
+```
+
+```txt
+<?xml version="1.0" encoding="UTF-8"?>
+<rss version="2.0">
+  <channel>
+    <title>DevBlog</title>
+    <link>http://localhost:3000</link>
+    <description>A small, real GraphQL-backed blog built with Next.js and NestJS.</description>
+    <item>
+      <title>...</title>
+      <link>http://localhost:3000/posts/...</link>
+      ...
+```
+
+```bash
+curl -s http://localhost:3000/sitemap.xml | grep -o '<loc>[^<]*</loc>' | head -5
+```
+
+```txt
+<loc>http://localhost:3000</loc>
+<loc>http://localhost:3000/tags</loc>
+<loc>http://localhost:3000/posts/...</loc>
+```
+
+ทุก slug ของโพสต์ที่ publish แล้วและทุก slug ของ tag จาก Verify section ของโมดูลก่อนหน้าควรปรากฏอยู่ที่ไหนสักที่ใน output นั้น publish อีกหนึ่งโพสต์ผ่าน Sandbox รอสักครู่ แล้วรัน `curl` ของ `sitemap.xml` ใหม่ — URL ของโพสต์ใหม่ควรปรากฏในที่สุด โดยไม่ต้อง redeploy ยืนยันว่า `sitemap.ts` เป็นข้อมูลสด ไม่ใช่ไฟล์ static ที่แช่แข็งไว้ตอน build
+
+## Recap
+
+`generateMetadata` แทนที่ title "DevBlog" แบบ static ทุกที่ของ `layout.tsx` ด้วย metadata จริงต่อ route: เวอร์ชันของหน้า home อ่านแค่ `searchParams` ไม่ต้อง fetch เลย เวอร์ชันของหน้าโพสต์ตั้งใจใช้ query เดียวกันเป๊ะกับ `PostPage` เพื่อให้ request memoization ของ Next เปลี่ยนสองการเรียกให้เป็น network round trip จริงครั้งเดียว `app/rss.xml/route.ts` เป็น Route Handler ที่ไม่ถูกแคชระดับ route โดย default ตั้งแต่ Next.js 15 แต่ยังถูกในการเรียกซ้ำเพราะ `revalidate: 300` ของ `gqlFetch` เองทำให้ Data Cache ข้างใต้ยังอุ่นอยู่ `app/sitemap.ts` คือ convention sitemap แบบผ่านโค้ดที่เป็นข้อมูลสด ซ้อน `revalidate` ของตัวเองทับบนของ `gqlFetch` เลือกใช้แทนไฟล์ static ตอน build เพราะชุด URL ของ DevBlog — หนึ่งรายการต่อโพสต์ที่ publish แล้ว, หนึ่งต่อ tag — ไม่มีทางรู้ได้จริง ๆ ก่อนที่ API จะถูก query นี่คือการปิด [Public Blog](/devblog/th/public-blog/): home list, หน้าโพสต์แต่ละอัน, หน้า tag, และตอนนี้ metadata, feed, และ sitemap ของมันทั้งหมดอ่านจากชั้น `gqlFetch` เดียวกัน แคชอย่างตั้งใจ ไม่ใช่โดยบังเอิญ ทุกที่ที่สำคัญ
+
+ถัดไป: [Admin Dashboard →](/devblog/th/admin/)

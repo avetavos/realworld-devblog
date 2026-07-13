@@ -1,0 +1,317 @@
+---
+title: Post page
+description: "Build app/posts/[slug]/page.tsx to fetch and render a single post's Markdown body with react-markdown, list its approved comments, and accept new ones through a client CommentForm."
+sidebar:
+  order: 2
+---
+
+## What we're building
+
+`apps/web/app/posts/[slug]/page.tsx` — a dynamic-segment Server Component that fetches `post(slug)` with ISR, renders the post's Markdown `body` through `react-markdown` and `remark-gfm`, and lists its approved comments; an optional `generateStaticParams` that pre-renders every published slug at build time; and `apps/web/components/CommentForm.tsx` — the course's first Client Component in the public blog, a small form that calls `addComment` through `gqlFetch` and shows an "awaiting moderation" message on success. A missing or still-`draft` slug renders Next's 404 through `notFound()`.
+
+## Why
+
+`post(slug)` from [Posts resolver](/devblog/en/graphql-api/posts-resolver/) returns `Post | null` — `null` for a slug nothing matches at all. That's only half of "not found," though: [Draft → published](/devblog/en/content-workflow/draft-publish/) established that a post can exist and still be `status: 'draft'`, and this page has no session at all to tell an admin previewing their own draft apart from any other visitor, so it treats both cases identically. `if (!post || post.status !== 'published') { return notFound(); }` covers both — a slug that matches nothing, and a slug that matches something not ready to be public yet — with the same one-line guard. `notFound()` itself works by throwing internally; Next catches that specific throw and renders the nearest `not-found.tsx` (or its own default 404 page, since this course doesn't add a custom one) instead of whatever this function would otherwise have returned. The type checker understands this too: `notFound()`'s return type is `never`, so everything after that `if` block narrows `post` from `PostWithComments | null` down to a plain `PostWithComments`, with no manual type assertion needed.
+
+That `PostWithComments` name is deliberate, not just a local convenience. `comments` is a real field on the GraphQL `Post` type — [The comment model](/devblog/en/comments/comment-model/) added it as a `@ResolveField()` — but it isn't on the shared `Post` interface in `lib/graphql.ts`. That's the right call, not an oversight: almost every other caller of `gqlFetch<{ post: Post }>` across this course (and every `PostCard` rendering a list) never asks for `comments` at all, so widening the one shared type to include a field nearly nobody needs would make every other call site's type technically wrong about what it actually fetched. This page instead declares `type PostWithComments = Post & { comments: Comment[] };` locally and asks `POST_QUERY` for a `comments { ... }` selection to match — a type that's accurate for exactly this one query, without changing what any other page's `Post` claims to have.
+
+`react-markdown` is the piece worth being precise about, because "render user-submitted Markdown safely" is a real security question, not a formality. `react-markdown` parses Markdown into an AST and walks it straight into React elements — `**bold**` becomes a real `<strong>` element in the tree, never a string handed to `dangerouslySetInnerHTML`. That means raw HTML written inside a post's `body` (someone typing a literal `<script>alert(1)</script>` into the Markdown editor [Admin](/devblog/en/admin/) will eventually build) renders as inert, escaped text on the page — visible as the literal characters `<script>alert(1)</script>`, never executed — because `react-markdown` doesn't support raw HTML passthrough unless you explicitly add the `rehype-raw` plugin, which this course does not. That's the sanitize note: this page needs no separate sanitizer library (like DOMPurify) to be safe, specifically because it never turns Markdown into an HTML string in the first place. `remark-gfm` adds GitHub-Flavored Markdown on top — tables, strikethrough, task lists, autolinked URLs — none of which change that safety story at all, since it's still AST-to-React the whole way through.
+
+`CommentForm` is a Client Component for the smallest reason the App Router recognizes: it needs `useState` to hold the three form fields and a submission status, neither of which a Server Component can have. Everything else on this page — the post's title, body, tag list, and the comment list itself — stays server-rendered; only the form's own subtree ships React code to the browser, the same "opt in exactly where you need it" boundary [App Router & layout](/devblog/en/frontend-foundations/app-router-layout/) established for the admin dashboard generally. Once `addComment` succeeds, `CommentForm` swaps itself for a plain "awaiting moderation" message rather than trying to insert the new comment into the list above it — there'd be nothing correct to insert. [Moderation](/devblog/en/comments/moderation/) established that a brand new comment is always `PENDING`, and this page's own `comments` selection only ever asks for the approved thread, so the comment that was just submitted genuinely isn't part of what this page is allowed to show yet. The message is the whole truth, not a placeholder for a feature this page is missing.
+
+## Pros & cons
+
+**`react-markdown`'s AST-to-React rendering (what we're using) vs. a Markdown-to-HTML-string library (e.g. `marked`) plus `dangerouslySetInnerHTML`.** A string-based renderer like `marked` is often faster in raw benchmarks and easier to cache as a single opaque HTML string, but handing that string to `dangerouslySetInnerHTML` means React trusts it completely — any raw HTML a post's `body` happens to contain (a pasted `<script>` tag, an `onerror` attribute on an `<img>`) executes in the browser exactly as written, unless a separate sanitizer (DOMPurify is the standard choice) scrubs it first. That sanitizer isn't optional with this approach — it's load-bearing, one more dependency and one more place a misconfiguration (an allowed tag or attribute that shouldn't be) reopens the exact hole it exists to close. `react-markdown` needs no such dependency: because it never produces an HTML string at all, there's nothing for a sanitizer to scrub in the first place, and the safety property holds by construction rather than by remembering to call the right function correctly every time.
+
+## Set it up
+
+Create `apps/web/components/CommentForm.module.css`:
+
+```css
+.form {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+  max-width: 480px;
+  margin-top: var(--space-4);
+}
+
+.field {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-1);
+  font-size: var(--text-sm);
+}
+
+.field input,
+.field textarea {
+  padding: var(--space-2);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-md);
+  font: inherit;
+}
+
+.error {
+  color: var(--color-danger);
+  font-size: var(--text-sm);
+}
+
+.success {
+  color: var(--color-muted);
+  font-size: var(--text-sm);
+}
+```
+
+Add the one new color variable it needs to `apps/web/app/globals.css`'s `:root` block, next to `--color-primary`:
+
+```css
+--color-danger: #b91c1c;
+```
+
+Create `apps/web/components/CommentForm.tsx`:
+
+```tsx
+'use client';
+
+import { useState } from 'react';
+import { gqlFetch } from '@/lib/graphql';
+import type { Comment } from '@/lib/graphql';
+import styles from './CommentForm.module.css';
+
+const ADD_COMMENT_MUTATION = `
+  mutation AddComment($postId: ID!, $input: AddCommentInput!) {
+    addComment(postId: $postId, input: $input) {
+      id
+      authorName
+      body
+      createdAt
+    }
+  }
+`;
+
+interface CommentFormProps {
+  postId: string;
+}
+
+export function CommentForm({ postId }: CommentFormProps) {
+  const [authorName, setAuthorName] = useState('');
+  const [authorEmail, setAuthorEmail] = useState('');
+  const [body, setBody] = useState('');
+  const [isSubmitting, setIsSubmitting] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const [submitted, setSubmitted] = useState(false);
+
+  async function handleSubmit(event: React.FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    setError(null);
+    setIsSubmitting(true);
+
+    try {
+      await gqlFetch<{ addComment: Comment }>(ADD_COMMENT_MUTATION, {
+        postId,
+        input: { authorName, authorEmail, body },
+      });
+      setAuthorName('');
+      setAuthorEmail('');
+      setBody('');
+      setSubmitted(true);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Something went wrong. Please try again.');
+    } finally {
+      setIsSubmitting(false);
+    }
+  }
+
+  if (submitted) {
+    return <p className={styles.success}>Thanks — your comment is awaiting moderation.</p>;
+  }
+
+  return (
+    <form className={styles.form} onSubmit={handleSubmit}>
+      <label className={styles.field}>
+        Name
+        <input
+          value={authorName}
+          onChange={(event) => setAuthorName(event.target.value)}
+          required
+          minLength={2}
+        />
+      </label>
+      <label className={styles.field}>
+        Email
+        <input
+          type="email"
+          value={authorEmail}
+          onChange={(event) => setAuthorEmail(event.target.value)}
+          required
+        />
+      </label>
+      <label className={styles.field}>
+        Comment
+        <textarea
+          value={body}
+          onChange={(event) => setBody(event.target.value)}
+          required
+          minLength={5}
+          rows={4}
+        />
+      </label>
+      {error && (
+        <p className={styles.error} role="alert">
+          {error}
+        </p>
+      )}
+      <button type="submit" disabled={isSubmitting}>
+        {isSubmitting ? 'Submitting…' : 'Submit comment'}
+      </button>
+    </form>
+  );
+}
+```
+
+Create `apps/web/app/posts/[slug]/page.tsx`:
+
+```tsx
+import Link from 'next/link';
+import { notFound } from 'next/navigation';
+import ReactMarkdown from 'react-markdown';
+import remarkGfm from 'remark-gfm';
+import { gqlFetch } from '@/lib/graphql';
+import type { Post, Comment } from '@/lib/graphql';
+import { CommentForm } from '@/components/CommentForm';
+
+type PostWithComments = Post & { comments: Comment[] };
+
+interface PostPageProps {
+  params: Promise<{ slug: string }>;
+}
+
+const POST_QUERY = `
+  query PostBySlug($slug: String!) {
+    post(slug: $slug) {
+      id
+      title
+      slug
+      body
+      status
+      tags
+      publishedAt
+      author {
+        displayName
+      }
+      comments {
+        id
+        authorName
+        body
+        createdAt
+      }
+    }
+  }
+`;
+
+const PUBLISHED_SLUGS_QUERY = `
+  query PublishedSlugs($status: PostStatus, $page: Int, $pageSize: Int) {
+    posts(status: $status, page: $page, pageSize: $pageSize) {
+      items {
+        slug
+      }
+    }
+  }
+`;
+
+export async function generateStaticParams() {
+  const { posts } = await gqlFetch<{ posts: { items: Pick<Post, 'slug'>[] } }>(
+    PUBLISHED_SLUGS_QUERY,
+    { status: 'PUBLISHED', page: 1, pageSize: 100 },
+  );
+  return posts.items.map((post) => ({ slug: post.slug }));
+}
+
+export default async function PostPage({ params }: PostPageProps) {
+  const { slug } = await params;
+  const { post } = await gqlFetch<{ post: PostWithComments | null }>(
+    POST_QUERY,
+    { slug },
+    { revalidate: 60, tags: [`post:${slug}`] },
+  );
+
+  if (!post || post.status !== 'published') {
+    return notFound();
+  }
+
+  return (
+    <article>
+      <h1>{post.title}</h1>
+      <p>
+        By {post.author.displayName}
+        {post.publishedAt && (
+          <>
+            {' '}
+            · <time dateTime={post.publishedAt}>{post.publishedAt}</time>
+          </>
+        )}
+      </p>
+      {post.tags.length > 0 && (
+        <ul>
+          {post.tags.map((tag) => (
+            <li key={tag}>
+              <Link href={`/tags/${tag}`}>{tag}</Link>
+            </li>
+          ))}
+        </ul>
+      )}
+
+      <ReactMarkdown remarkPlugins={[remarkGfm]}>{post.body}</ReactMarkdown>
+
+      <section>
+        <h2>Comments ({post.comments.length})</h2>
+        <ul>
+          {post.comments.map((comment) => (
+            <li key={comment.id}>
+              <strong>{comment.authorName}</strong>{' '}
+              <time dateTime={comment.createdAt}>{comment.createdAt}</time>
+              <p>{comment.body}</p>
+            </li>
+          ))}
+        </ul>
+        <CommentForm postId={post.id} />
+      </section>
+    </article>
+  );
+}
+```
+
+- **`type PostWithComments = Post & { comments: Comment[] }`** — declared locally, not added to `lib/graphql.ts`'s shared `Post`, exactly for the reason the Why section above named: no other caller needs it.
+- **`generateStaticParams`** pre-renders every slug it returns at build time, but on-demand: requesting a slug this function *didn't* return still works — Next falls back to rendering it on the fly on first request and caching that result under the same `revalidate: 60` rule, rather than 404ing. That fallback is the default (`dynamicParams` is `true` unless a page explicitly sets it to `false`); this page never sets it, so a post published after the last build is still reachable immediately, just not pre-built.
+- **`pageSize: 100`** in `generateStaticParams` is a real, named limit, not an oversight — only the first 100 published slugs get prerendered at build time. A course-sized blog never approaches that; a real deployment with a larger archive would page through every `posts` result during the build, not assume one call returns everything.
+- **These links point at `/tags/<slug>`**, a route [Tag pages](/devblog/en/public-blog/tag-pages/) builds next. Until then, clicking one 404s — the same "forward reference before the destination exists" pattern the `Admin` nav link in [App Router & layout](/devblog/en/frontend-foundations/app-router-layout/) already used.
+- **`return notFound();`** rather than a bare `notFound();` — functionally identical, since `notFound()` throws either way and never returns, but writing `return` in front of it reads as the deliberate "stop here" it is, matching the pattern Next's own examples use.
+
+## Verify
+
+```bash
+cd apps/web
+npm run dev
+```
+
+Open `http://localhost:3000/posts/<a published slug>` — the title, author, date, tag links, rendered Markdown body, and any approved comments from [Moderation](/devblog/en/comments/moderation/)'s Verify section should all appear. Confirm the Markdown itself rendered, not raw text, by checking that a `**bold**` word in the post's body shows up bold, not with literal asterisks.
+
+Now prove `notFound()` fires for both cases it's meant to catch:
+
+```bash
+curl -s -o /dev/null -w '%{http_code}\n' http://localhost:3000/posts/does-not-exist
+```
+
+```txt
+404
+```
+
+Create a post through the Sandbox and leave it `draft` (don't call `publishPost`), then request its slug the same way — it should also 404, even though `post(slug)` on the API side returns real data for it (an admin querying the API directly still gets the draft back; this page is the layer that decides the public site shouldn't).
+
+Finally, submit the `CommentForm` on a published post: fill in a name, a valid email, and a comment of 5+ characters, and submit. The form should replace itself with "Thanks — your comment is awaiting moderation," and reloading the page should **not** show the new comment yet — confirming it landed as `PENDING`, exactly like every comment [The comment model](/devblog/en/comments/comment-model/) creates.
+
+## Recap
+
+`app/posts/[slug]/page.tsx` fetches `post(slug)` with ISR, calls `notFound()` for both a missing slug and a `draft` one, and renders the Markdown `body` through `react-markdown` plus `remark-gfm` — safe by construction, with no HTML string and no sanitizer needed, since raw HTML in a post body renders as inert text rather than executing. `generateStaticParams` pre-builds the first 100 published slugs at build time, with `dynamicParams`'s default `true` covering everything published afterward on demand. `CommentForm` is the public blog's first Client Component, scoped to exactly the subtree that needs `useState`, calling `addComment` through `gqlFetch` and showing an "awaiting moderation" message rather than a comment that would be inaccurate to display, since a new comment is always `PENDING` and this page only ever renders the approved thread.
+
+Next: [Tag pages →](/devblog/en/public-blog/tag-pages/)

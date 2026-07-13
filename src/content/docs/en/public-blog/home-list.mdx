@@ -1,0 +1,142 @@
+---
+title: The home list
+description: "Build app/page.tsx as a Server Component that fetches published posts through gqlFetch with ISR, renders a PostCard grid, and paginates with a ?page= search param."
+sidebar:
+  order: 1
+---
+
+## What we're building
+
+`apps/web/app/page.tsx` for real: a Server Component that calls `gqlFetch` for published posts with `revalidate: 60`, renders them through [PostCard](/devblog/en/frontend-foundations/styling/) in a grid, and reads a `?page=` search param for simple page-based pagination. Alongside it, `apps/web/components/PostGrid.module.css` — the two small classes, `.grid` and `.pagination`, that this page needs and [Tag pages](/devblog/en/public-blog/tag-pages/) reuses without duplicating. This replaces the placeholder `<ul>` of post titles that [GraphQL client & auth](/devblog/en/frontend-foundations/graphql-client/) and [Styling](/devblog/en/frontend-foundations/styling/) each temporarily pasted into `page.tsx` just to prove `gqlFetch` and `PostCard` worked in isolation.
+
+## Why
+
+Every page this course has fetched from so far used a single hardcoded `page: 1`. A real home list needs a real page number, and the App Router's answer is `searchParams` — the same mechanism `params` gives a dynamic route segment, but for the URL's query string instead. As of the version of Next.js this course targets, both `params` and `searchParams` arrive as `Promise`s that a Server Component `await`s before reading; `HomePage` awaits `searchParams`, pulls out `page`, and falls back to `1` with `Math.max(1, Number(pageParam) || 1)` — `Number(undefined)` is `NaN`, `Number('abc')` is also `NaN`, and `Number('0')` or `Number('-3')` are real numbers below `1`, so the guard has to catch all three the same way, not just the missing case.
+
+`revalidate: 60` is the whole ISR story for this page: the first request after the cached copy turns 60 seconds old still gets that stale copy back immediately — nobody's request ever blocks on a live regeneration — while Next kicks off a fresh fetch in the background. The *next* request after that background fetch resolves gets the new data; every request in between still saw the old one. That's the stale-while-revalidate model `gqlFetch`'s `next: { revalidate, tags }` option was built in [GraphQL client & auth](/devblog/en/frontend-foundations/graphql-client/) to opt into, and it's genuinely different from what every earlier module's Verify section did: those called `gqlFetch` with no `revalidate` at all, which falls through to `cache: 'no-store'` — a real network round trip to the API on every single request, which was the right default for proving a fetch worked, not for a page real visitors will load repeatedly.
+
+`tags: ['posts']` doesn't do anything on its own yet — no code anywhere calls `revalidateTag('posts')` to force this page fresh on demand. That's a real, named gap: the natural place for it would be the moment an admin publishes or unpublishes a post, but [Admin](/devblog/en/admin/)'s dashboard (Module 10) calls the NestJS API directly from the browser through `gqlFetch`, the same way `lib/auth.ts`'s token helpers do — there's no Next.js Server Action or Route Handler in the write path for `revalidateTag` to live inside. Until one exists, every publish becomes visible to the home list only when the 60-second window naturally expires, never sooner. The tag is set now so that future code has something to call `revalidateTag` with; it just has nothing calling it yet.
+
+## Pros & cons
+
+**ISR with `revalidate: 60` (what we're using) vs. full SSR (`cache: 'no-store'`) vs. static SSG (no `revalidate` at all).** Full SSR — what every earlier module's temporary `page.tsx` did — guarantees every visitor sees data that's at most a network round trip old, at the cost of paying that round trip, every time, for every visitor; it also can't be served from a CDN edge cache at all, since Next has to run the Server Component fresh per request. Static SSG — pre-rendering this page once at build time with no `revalidate` key and never touching the API again until the next deploy — is the fastest and cheapest option by far, served straight from static output with zero server work per request, but a newly published post simply doesn't exist on this page until someone reruns the build; for a blog whose entire point is publishing new posts, that's disqualifying without a rebuild-on-publish webhook wired up, which this course doesn't build. ISR sits between the two: almost as fast as SSG for almost every request, since a cache hit costs nothing beyond serving stored HTML, but bounded to at most 60 seconds of staleness rather than staleness measured in deploys — the right trade for a blog home page, which doesn't need to be instantaneous but does need to eventually catch up on its own, unattended.
+
+## Set it up
+
+Create `apps/web/components/PostGrid.module.css`:
+
+```css
+.grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(280px, 1fr));
+  gap: var(--space-6);
+}
+
+.pagination {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-top: var(--space-8);
+  font-size: var(--text-sm);
+  color: var(--color-muted);
+}
+```
+
+Replace `apps/web/app/page.tsx` with the real home list:
+
+```tsx
+import Link from 'next/link';
+import { gqlFetch } from '@/lib/graphql';
+import type { PostPage } from '@/lib/graphql';
+import { PostCard } from '@/components/PostCard';
+import styles from '@/components/PostGrid.module.css';
+
+const PAGE_SIZE = 10;
+
+const POSTS_QUERY = `
+  query Posts($status: PostStatus, $page: Int, $pageSize: Int) {
+    posts(status: $status, page: $page, pageSize: $pageSize) {
+      items {
+        id
+        title
+        slug
+        excerpt
+        coverImage
+        tags
+        publishedAt
+        author {
+          displayName
+        }
+      }
+      total
+      page
+      pageSize
+    }
+  }
+`;
+
+interface HomePageProps {
+  searchParams: Promise<{ page?: string }>;
+}
+
+export default async function HomePage({ searchParams }: HomePageProps) {
+  const { page: pageParam } = await searchParams;
+  const page = Math.max(1, Number(pageParam) || 1);
+
+  const { posts } = await gqlFetch<{ posts: PostPage }>(
+    POSTS_QUERY,
+    { status: 'PUBLISHED', page, pageSize: PAGE_SIZE },
+    { revalidate: 60, tags: ['posts'] },
+  );
+
+  const totalPages = Math.max(1, Math.ceil(posts.total / posts.pageSize));
+
+  return (
+    <>
+      <div className={styles.grid}>
+        {posts.items.map((post) => (
+          <PostCard key={post.id} post={post} />
+        ))}
+      </div>
+      <nav className={styles.pagination}>
+        {page > 1 && <Link href={`/?page=${page - 1}`}>← Newer</Link>}
+        <span>
+          Page {page} of {totalPages}
+        </span>
+        {page < totalPages && <Link href={`/?page=${page + 1}`}>Older →</Link>}
+      </nav>
+    </>
+  );
+}
+```
+
+- **`searchParams: Promise<{ page?: string }>`** — a URL search param is always a string (or absent) as far as Next is concerned; `?page=2` arrives as `{ page: '2' }`, never `{ page: 2 }`. Converting it to a number is this component's job, not the framework's.
+- **`Math.max(1, Number(pageParam) || 1)`** — `Number(pageParam) || 1` turns a missing, non-numeric, or `0` param into `1`; the outer `Math.max(1, ...)` catches a syntactically valid but negative number (`?page=-5`) that the `||` alone wouldn't. Neither guard alone is enough on its own.
+- **`status: 'PUBLISHED'`** is passed explicitly, matching every earlier module's convention, even though [Posts resolver](/devblog/en/graphql-api/posts-resolver/) already defaults an omitted `status` argument to published for an unauthenticated caller — being explicit here costs nothing and means this query reads the same way regardless of what the API's own default happens to be.
+- **`{ revalidate: 60, tags: ['posts'] }`** is the one call in this file that actually opts into ISR — everywhere else `gqlFetch` has been called in this course either passed no third argument (falling back to `cache: 'no-store'`) or was inside a mutation, where caching would be wrong regardless.
+- **`totalPages`** is derived from `posts.total` and `posts.pageSize`, both of which came back from the API on this exact request — nothing here hardcodes `PAGE_SIZE` twice or assumes the API and the client agree on a page size by convention rather than by reading the response.
+
+## Verify
+
+With the API running and at least two pages' worth of published posts (10+ from earlier modules' Verify sections, or create more through the Sandbox), start the dev server:
+
+```bash
+cd apps/web
+npm run dev
+```
+
+Open `http://localhost:3000` — you should see a responsive grid of `PostCard`s, one per published post on page 1, and — if there's more than one page — an "Older →" link. Click it and confirm the URL becomes `http://localhost:3000/?page=2` and a different set of posts renders.
+
+Now prove the ISR window is real. Publish a new post through the Sandbox (a `createPost` mutation followed by `publishPost`, from [Content Workflow](/devblog/en/content-workflow/draft-publish/)), then immediately reload `http://localhost:3000` — the new post should **not** appear yet, since the cached copy hasn't hit 60 seconds old. Wait a little over a minute, reload again, and it should appear this time, proving `revalidate: 60` bounded the staleness rather than caching the page forever or never caching it at all.
+
+```txt
+t=0s    publish a new post through the Sandbox
+t=5s    reload localhost:3000  → new post absent (cache still fresh)
+t=65s   reload localhost:3000  → new post present (cache regenerated)
+```
+
+## Recap
+
+`apps/web/app/page.tsx` is now the real home list: a Server Component that `await`s `searchParams` for a `?page=` value, calls `gqlFetch` with `status: 'PUBLISHED'` and explicit `page`/`pageSize`, and opts into ISR with `{ revalidate: 60, tags: ['posts'] }` — the first call in this course to actually use that option rather than fall back to `cache: 'no-store'`. `PostGrid.module.css` supplies the `.grid` and `.pagination` classes [Tag pages](/devblog/en/public-blog/tag-pages/) reuses rather than redefines. ISR's trade-off against full SSR and static SSG was named explicitly: bounded staleness instead of either zero staleness (SSR's cost) or staleness measured in deploys (SSG's cost) — and the `tags: ['posts']` cache tag is set with no `revalidateTag` caller yet, an honest gap this course leaves for [Admin](/devblog/en/admin/) to eventually close.
+
+Next: [Post page →](/devblog/en/public-blog/post-page/)

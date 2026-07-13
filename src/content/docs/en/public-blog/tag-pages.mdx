@@ -1,0 +1,261 @@
+---
+title: Tag pages
+description: "Filter posts by tag with a dynamic app/tags/[slug]/page.tsx route, list every tag at app/tags/page.tsx, and link tags from PostCard without nesting anchors."
+sidebar:
+  order: 3
+---
+
+## What we're building
+
+`apps/web/app/tags/[slug]/page.tsx` — a dynamic-segment Server Component that reuses [The home list](/devblog/en/public-blog/home-list/)'s `posts` query, this time filtered by `tag: slug`, with the same ISR and pagination shape. `apps/web/app/tags/page.tsx` — a plain index listing every `Tag` from the `tags` query. And a small but real update to `apps/web/components/PostCard.tsx` and `Card.module.css` from [Styling](/devblog/en/frontend-foundations/styling/): each tag it renders becomes its own link to the tag page that shows it, instead of plain comma-separated text.
+
+## Why
+
+`[slug]` here works exactly like `[slug]` did in [Post page](/devblog/en/public-blog/post-page/): a folder name in brackets binds whatever segment of the URL sits in that position to `params.slug`, `await`ed the same way. The difference is what that string means to the query — a post page's `slug` looks up one `Post` by its own unique slug; a tag page's `slug` is passed straight through as `posts`' `tag` argument, filtering a list rather than looking up a single document. `PostsResolver.posts` from [Posts resolver](/devblog/en/graphql-api/posts-resolver/) has no idea "tag page" exists as a concept — it just filters `Post.tags` for a matching string, the same denormalized `string[]` [Tags resolver](/devblog/en/graphql-api/tags-resolver/) already described as having no real relationship to the `Tag` collection at all.
+
+That last fact has a real consequence this page has to handle honestly: unlike a post slug, which `post(slug)` either finds or returns `null` for, a tag slug has no equivalent "this doesn't exist" signal from `posts(tag: slug)` alone — an unrecognized tag slug just comes back with `total: 0` and an empty `items` array, the exact same response a *real* tag with zero currently-published posts would produce. There's no way to tell "nobody has written about `raspberry-pi` yet" apart from "`raspbery-pi` is a typo for a tag that doesn't exist" from this query's response shape alone. This page doesn't pretend otherwise by calling `notFound()` on an empty result — that would incorrectly 404 a real, valid, simply-empty tag — it renders "No posts found for this tag" instead, an honest response to a question the API genuinely can't answer any more precisely than that.
+
+The `PostCard` update is a small, concrete lesson in HTML validity, not just styling. [Styling](/devblog/en/frontend-foundations/styling/) built the whole card as one big `<Link href={.../posts/slug} className={styles.card}>` wrapping everything, including the comma-joined tag text. The moment a tag needs to become its own link to `/tags/<slug>`, that structure breaks: `<Link>` renders a real `<a>` element, and an `<a>` nested inside another `<a>` is invalid HTML — browsers silently close the outer anchor early to cope with it, which means clicking what looks like it's still inside the card link can stop navigating to the post at all, in a way that varies by browser and is easy to miss just by glancing at the rendered page. The fix is structural: the outer wrapper becomes a plain `<div className={styles.card}>`, the cover image, title, and excerpt move inside their own `<Link>` to the post, and each tag gets its own separate `<Link>` to its tag page, as a sibling, not a descendant, of the post link.
+
+## Pros & cons
+
+**A dynamic route segment per tag (`/tags/[slug]`, this lesson) vs. a query-string filter (`/?tag=slug`), the same choice [The home list](/devblog/en/public-blog/home-list/)'s own `?page=` pagination made for a different axis.** Pagination stayed a query string on purpose: page 2 of the home list isn't meaningfully different content from page 1 — it's the same list, further along — so it doesn't deserve its own canonical URL, doesn't appear in [`sitemap.ts`](/devblog/en/public-blog/seo-rss/), and search engines are typically told to treat paginated variants as one unit rather than index each page separately. A tag, by contrast, genuinely identifies distinct content: "posts about nestjs" is a real, shareable, bookmarkable, indexable destination in its own right, worth a real path and its own entry in the sitemap. Giving tags a real route costs one more folder (`app/tags/[slug]/`) and, per [Post page](/devblog/en/public-blog/post-page/)'s equivalent trade-off, an optional `generateStaticParams` decision this lesson doesn't add (a tag's post list changes too often — every new post touches it — to be worth pre-building at all); giving pagination a real route instead of a query string would have bought nothing while adding routes with no distinct identity of their own.
+
+## Set it up
+
+Update `apps/web/components/Card.module.css` — add tag-link styling and rename the card's own hover target:
+
+```css
+.card {
+  display: block;
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-md);
+  padding: var(--space-4);
+  margin-bottom: var(--space-4);
+}
+
+.card:hover {
+  border-color: var(--color-primary);
+}
+
+.titleLink {
+  display: block;
+}
+
+.cover {
+  width: 100%;
+  border-radius: var(--radius-md);
+  margin-bottom: var(--space-3);
+}
+
+.title {
+  font-size: var(--text-lg);
+  margin: 0 0 var(--space-2);
+}
+
+.excerpt {
+  color: var(--color-muted);
+  margin: 0 0 var(--space-3);
+}
+
+.meta {
+  display: flex;
+  gap: var(--space-3);
+  font-size: var(--text-sm);
+  color: var(--color-muted);
+}
+
+.tags a {
+  color: var(--color-primary);
+}
+
+.tags a:hover {
+  text-decoration: underline;
+}
+```
+
+Update `apps/web/components/PostCard.tsx` so the card is a `<div>`, not a `<Link>`, with the post link and each tag link as siblings:
+
+```tsx
+import Link from 'next/link';
+import styles from './Card.module.css';
+import type { Post } from '@/lib/graphql';
+
+interface PostCardProps {
+  post: Pick<Post, 'title' | 'slug' | 'excerpt' | 'coverImage' | 'tags' | 'publishedAt'>;
+}
+
+export function PostCard({ post }: PostCardProps) {
+  return (
+    <div className={styles.card}>
+      <Link href={`/posts/${post.slug}`} className={styles.titleLink}>
+        {post.coverImage && <img className={styles.cover} src={post.coverImage} alt="" />}
+        <h2 className={styles.title}>{post.title}</h2>
+        {post.excerpt && <p className={styles.excerpt}>{post.excerpt}</p>}
+      </Link>
+      <div className={styles.meta}>
+        {post.publishedAt && <time dateTime={post.publishedAt}>{post.publishedAt}</time>}
+        {post.tags.length > 0 && (
+          <span className={styles.tags}>
+            {post.tags.map((tag, index) => (
+              <span key={tag}>
+                {index > 0 && ', '}
+                <Link href={`/tags/${tag}`}>{tag}</Link>
+              </span>
+            ))}
+          </span>
+        )}
+      </div>
+    </div>
+  );
+}
+```
+
+Create `apps/web/app/tags/page.tsx`:
+
+```tsx
+import Link from 'next/link';
+import { gqlFetch } from '@/lib/graphql';
+import type { Tag } from '@/lib/graphql';
+
+const TAGS_QUERY = `
+  query Tags {
+    tags {
+      id
+      name
+      slug
+    }
+  }
+`;
+
+export default async function TagsIndexPage() {
+  const { tags } = await gqlFetch<{ tags: Tag[] }>(TAGS_QUERY, undefined, {
+    revalidate: 300,
+    tags: ['tags-list'],
+  });
+
+  return (
+    <>
+      <h1>Tags</h1>
+      <ul>
+        {tags.map((tag) => (
+          <li key={tag.id}>
+            <Link href={`/tags/${tag.slug}`}>{tag.name}</Link>
+          </li>
+        ))}
+      </ul>
+    </>
+  );
+}
+```
+
+Create `apps/web/app/tags/[slug]/page.tsx`:
+
+```tsx
+import Link from 'next/link';
+import { gqlFetch } from '@/lib/graphql';
+import type { PostPage } from '@/lib/graphql';
+import { PostCard } from '@/components/PostCard';
+import styles from '@/components/PostGrid.module.css';
+
+const PAGE_SIZE = 10;
+
+const POSTS_BY_TAG_QUERY = `
+  query PostsByTag($status: PostStatus, $tag: String!, $page: Int, $pageSize: Int) {
+    posts(status: $status, tag: $tag, page: $page, pageSize: $pageSize) {
+      items {
+        id
+        title
+        slug
+        excerpt
+        coverImage
+        tags
+        publishedAt
+        author {
+          displayName
+        }
+      }
+      total
+      page
+      pageSize
+    }
+  }
+`;
+
+interface TagPageProps {
+  params: Promise<{ slug: string }>;
+  searchParams: Promise<{ page?: string }>;
+}
+
+export default async function TagPage({ params, searchParams }: TagPageProps) {
+  const { slug } = await params;
+  const { page: pageParam } = await searchParams;
+  const page = Math.max(1, Number(pageParam) || 1);
+
+  const { posts } = await gqlFetch<{ posts: PostPage }>(
+    POSTS_BY_TAG_QUERY,
+    { status: 'PUBLISHED', tag: slug, page, pageSize: PAGE_SIZE },
+    { revalidate: 60, tags: [`tag:${slug}`] },
+  );
+
+  const totalPages = Math.max(1, Math.ceil(posts.total / posts.pageSize));
+
+  return (
+    <>
+      <h1>Posts tagged &ldquo;{slug}&rdquo;</h1>
+      {posts.items.length === 0 ? (
+        <p>No posts found for this tag.</p>
+      ) : (
+        <>
+          <div className={styles.grid}>
+            {posts.items.map((post) => (
+              <PostCard key={post.id} post={post} />
+            ))}
+          </div>
+          <nav className={styles.pagination}>
+            {page > 1 && <Link href={`/tags/${slug}?page=${page - 1}`}>← Newer</Link>}
+            <span>
+              Page {page} of {totalPages}
+            </span>
+            {page < totalPages && <Link href={`/tags/${slug}?page=${page + 1}`}>Older →</Link>}
+          </nav>
+        </>
+      )}
+    </>
+  );
+}
+```
+
+- **`.titleLink { display: block; }`** replaces `.card` as the class on the inner `<Link>` — it needs to behave like a block-level element the way the old single anchor did, so the cover image, title, and excerpt still stack and fill the card's width exactly as before. `.card` itself moves to the outer `<div>`, unchanged otherwise, so the border, padding, and hover color all look identical to [Styling](/devblog/en/frontend-foundations/styling/)'s screenshot even though the underlying element changed from `<a>` to `<div>`.
+- **`styles from '@/components/PostGrid.module.css'`** — the exact same CSS Module file [The home list](/devblog/en/public-blog/home-list/) created, imported by its component-relative alias rather than a route-relative path like `../../page.module.css`. Reusing the file this way means a change to `.grid` or `.pagination` updates both pages at once, with no second copy to keep in sync.
+- **`posts(status: $status, tag: $tag, ...)`** is the identical query shape to `home-list.mdx`'s `POSTS_QUERY` with one added required argument — the same `PostsResolver.posts` resolver, the same `PostPage` response type, just a different filter.
+- **The empty-state branch** (`posts.items.length === 0`) is the concrete form of the Why section's point: this page treats a real-but-empty tag and (implicitly) an unrecognized one identically, because `posts(tag: slug)` genuinely cannot tell them apart.
+
+## Verify
+
+```bash
+cd apps/web
+npm run dev
+```
+
+Open `http://localhost:3000/tags` — every tag from [Tags resolver](/devblog/en/graphql-api/tags-resolver/)'s Verify section should be listed and linked. Click one through to `http://localhost:3000/tags/<slug>` and confirm the grid shows only posts carrying that tag.
+
+Now go back to `http://localhost:3000` (the home list) or a post page and click a tag directly on a `PostCard` or on [Post page](/devblog/en/public-blog/post-page/)'s tag list — it should land on the same filtered tag page. Open your browser's element inspector on a card and confirm there's no `<a>` nested inside another `<a>` anywhere in the markup; the outer card is a `<div>`, the title/cover/excerpt block is one `<a>`, and each tag is its own separate `<a>`, all as siblings.
+
+Finally, visit a slug with no real tag behind it at all:
+
+```bash
+curl -s -o /dev/null -w '%{http_code}\n' http://localhost:3000/tags/not-a-real-tag
+```
+
+```txt
+200
+```
+
+A `200`, not a `404` — confirming the page rendered its "No posts found for this tag" message rather than treating an unrecognized slug as an error.
+
+## Recap
+
+`app/tags/[slug]/page.tsx` reuses `home-list.mdx`'s exact `posts` query shape with an added `tag` filter, the same ISR and pagination pattern, and an honest empty-state instead of a `notFound()` call it has no reliable grounds to make — `posts(tag: slug)` can't distinguish a real, empty tag from a typo. `app/tags/page.tsx` lists every `Tag` from the unguarded `tags` query. `PostCard` changed from one big anchor to a `<div>` wrapping a title/cover/excerpt `<Link>` and separate per-tag `<Link>`s, fixing what would otherwise be invalid nested-anchor HTML the moment tags became clickable — a small, concrete reminder that a component built for one interaction pattern sometimes needs real restructuring, not just an added `href`, when a second interaction pattern is layered on top of it.
+
+Next: [SEO, RSS & sitemap →](/devblog/en/public-blog/seo-rss/)

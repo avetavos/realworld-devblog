@@ -1,0 +1,261 @@
+---
+title: Tag pages
+description: "กรองโพสต์ตาม tag ด้วย route แบบ dynamic app/tags/[slug]/page.tsx, แสดงรายการ tag ทั้งหมดที่ app/tags/page.tsx, และลิงก์ tag จาก PostCard โดยไม่ซ้อน anchor"
+sidebar:
+  order: 3
+---
+
+## What we're building
+
+`apps/web/app/tags/[slug]/page.tsx` — Server Component แบบ dynamic-segment ที่เอา query `posts` ของ [The home list](/devblog/th/public-blog/home-list/) มาใช้ซ้ำ คราวนี้กรองด้วย `tag: slug` ด้วย ISR และการแบ่งหน้ารูปแบบเดียวกัน `apps/web/app/tags/page.tsx` — index ธรรมดาที่แสดงทุก `Tag` จาก query `tags` และการอัปเดตเล็ก ๆ แต่จริงจังให้ `apps/web/components/PostCard.tsx` และ `Card.module.css` จาก [Styling](/devblog/th/frontend-foundations/styling/): แต่ละ tag ที่มันเรนเดอร์จะกลายเป็นลิงก์ของตัวเองไปยังหน้า tag ที่แสดงมัน แทนที่จะเป็นข้อความคั่นด้วยจุลภาคธรรมดา
+
+## Why
+
+`[slug]` ตรงนี้ทำงานเหมือนกับ `[slug]` ใน [Post page](/devblog/th/public-blog/post-page/) เป๊ะ: ชื่อโฟลเดอร์ในวงเล็บเหลี่ยมผูก segment ไหนก็ตามของ URL ที่อยู่ตำแหน่งนั้นเข้ากับ `params.slug` `await` แบบเดียวกัน ความต่างอยู่ที่ความหมายของ string นั้นต่อ query — `slug` ของ post page ค้นหา `Post` เดียวด้วย slug เฉพาะของตัวมันเอง ส่วน `slug` ของ tag page ถูกส่งผ่านตรง ๆ เป็นอาร์กิวเมนต์ `tag` ของ `posts` กรองรายการแทนที่จะค้นหาเอกสารเดียว `PostsResolver.posts` จาก [Posts resolver](/devblog/th/graphql-api/posts-resolver/) ไม่รู้จักแนวคิด "tag page" เลยด้วยซ้ำ — มันแค่กรอง `Post.tags` หา string ที่ตรงกัน ซึ่งเป็น `string[]` แบบ denormalized เดียวกับที่ [Tags resolver](/devblog/th/graphql-api/tags-resolver/) บรรยายไว้แล้วว่าไม่มีความสัมพันธ์จริงกับ collection `Tag` เลย
+
+ข้อเท็จจริงข้อสุดท้ายนั้นมีผลจริงที่หน้านี้ต้องจัดการอย่างตรงไปตรงมา: ต่างจาก post slug ที่ `post(slug)` หาเจอหรือคืน `null` ตรง ๆ tag slug ไม่มีสัญญาณ "ไม่มีอยู่จริง" ที่เทียบเท่าจาก `posts(tag: slug)` เพียงอย่างเดียว — tag slug ที่ไม่รู้จักก็แค่คืน `total: 0` และ `items` ว่างเปล่ากลับมา response แบบเดียวกันเป๊ะกับที่ tag จริงที่บังเอิญยังไม่มีโพสต์ publish แล้วเลยจะให้กลับมา ไม่มีทางบอกได้ว่า "ยังไม่มีใครเขียนเกี่ยวกับ `raspberry-pi`" ต่างจาก "`raspbery-pi` พิมพ์ผิดของ tag ที่ไม่มีอยู่จริง" จากรูปร่างของ response ของ query นี้เพียงอย่างเดียว หน้านี้ไม่ได้แสร้งทำเป็นอื่นด้วยการเรียก `notFound()` กับผลลัพธ์ว่างเปล่า — นั่นจะ 404 tag จริงที่แค่บังเอิญว่างเปล่าอย่างผิด ๆ — มันเรนเดอร์ "No posts found for this tag" แทน เป็นคำตอบที่ตรงไปตรงมาต่อคำถามที่ API ตอบได้แม่นยำกว่านั้นไม่ได้จริง ๆ
+
+การอัปเดต `PostCard` เป็นบทเรียนเล็ก ๆ ที่เป็นรูปธรรมเรื่องความถูกต้องของ HTML ไม่ใช่แค่เรื่อง styling [Styling](/devblog/th/frontend-foundations/styling/) สร้างทั้งการ์ดเป็น `<Link href={.../posts/slug} className={styles.card}>` ก้อนเดียวที่ห่อทุกอย่าง รวมถึงข้อความ tag ที่คั่นด้วยจุลภาค ทันทีที่ tag ต้องกลายเป็นลิงก์ของตัวเองไปที่ `/tags/<slug>` โครงสร้างนั้นก็พัง: `<Link>` เรนเดอร์ element `<a>` จริง ๆ และ `<a>` ที่ซ้อนอยู่ข้างใน `<a>` อีกตัวเป็น HTML ที่ไม่ถูกต้อง — browser จะปิด anchor ด้านนอกก่อนเวลาแบบเงียบ ๆ เพื่อรับมือกับมัน ซึ่งหมายความว่าการคลิกสิ่งที่ดูเหมือนยังอยู่ในลิงก์การ์ดอาจหยุดการนำทางไปโพสต์ไปเลยในแบบที่ต่างกันไปตาม browser และพลาดดูง่ายแค่มองหน้าที่เรนเดอร์แล้ว วิธีแก้คือเชิงโครงสร้าง: wrapper ด้านนอกกลายเป็น `<div className={styles.card}>` ธรรมดา รูปปก, ชื่อเรื่อง, และ excerpt ย้ายเข้าไปใน `<Link>` ของตัวเองไปที่โพสต์ และแต่ละ tag ได้ `<Link>` แยกของตัวเองไปที่หน้า tag ในฐานะ sibling ไม่ใช่ descendant ของลิงก์โพสต์
+
+## Pros & cons
+
+**Route แบบ dynamic segment ต่อ tag (`/tags/[slug]`, บทเรียนนี้) เทียบกับ query-string filter (`/?tag=slug`) การตัดสินใจแบบเดียวกับที่การแบ่งหน้า `?page=` ของ [The home list](/devblog/th/public-blog/home-list/) เองทำไว้สำหรับแกนที่ต่างกัน** การแบ่งหน้ายังคงเป็น query string โดยตั้งใจ: หน้า 2 ของ home list ไม่ใช่เนื้อหาที่ต่างออกไปอย่างมีความหมายจากหน้า 1 — มันคือรายการเดียวกัน ต่อไปอีกหน่อย — ดังนั้นมันไม่สมควรมี URL ของตัวเอง ไม่ปรากฏใน [`sitemap.ts`](/devblog/th/public-blog/seo-rss/) และ search engine มักถูกบอกให้ปฏิบัติกับตัวแปรที่แบ่งหน้าเป็นหน่วยเดียวแทนที่จะ index แยกแต่ละหน้า ในทางกลับกัน tag ระบุเนื้อหาที่ต่างออกไปจริง ๆ: "โพสต์เกี่ยวกับ nestjs" เป็นปลายทางที่แชร์ได้, bookmark ได้, index ได้จริง ๆ ในสิทธิ์ของตัวมันเอง คุ้มค่าที่จะมี path จริงและรายการของตัวเองใน sitemap การให้ tag มี route จริงมีต้นทุนแค่อีกหนึ่งโฟลเดอร์ (`app/tags/[slug]/`) และตาม trade-off ที่เทียบเท่ากันของ [Post page](/devblog/th/public-blog/post-page/) การตัดสินใจ `generateStaticParams` แบบ optional ที่บทเรียนนี้ไม่ได้เพิ่ม (รายการโพสต์ของ tag เปลี่ยนบ่อยเกินไป — ทุกโพสต์ใหม่แตะมัน — จนไม่คุ้มที่จะ pre-build เลย) การให้การแบ่งหน้ามี route จริงแทน query string จะไม่ได้อะไรเลยในขณะที่เพิ่ม route ที่ไม่มีตัวตนที่แยกจากกันจริง ๆ ของตัวเอง
+
+## Set it up
+
+อัปเดต `apps/web/components/Card.module.css` — เพิ่ม styling ของลิงก์ tag และเปลี่ยนชื่อเป้าหมาย hover ของการ์ดเอง:
+
+```css
+.card {
+  display: block;
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-md);
+  padding: var(--space-4);
+  margin-bottom: var(--space-4);
+}
+
+.card:hover {
+  border-color: var(--color-primary);
+}
+
+.titleLink {
+  display: block;
+}
+
+.cover {
+  width: 100%;
+  border-radius: var(--radius-md);
+  margin-bottom: var(--space-3);
+}
+
+.title {
+  font-size: var(--text-lg);
+  margin: 0 0 var(--space-2);
+}
+
+.excerpt {
+  color: var(--color-muted);
+  margin: 0 0 var(--space-3);
+}
+
+.meta {
+  display: flex;
+  gap: var(--space-3);
+  font-size: var(--text-sm);
+  color: var(--color-muted);
+}
+
+.tags a {
+  color: var(--color-primary);
+}
+
+.tags a:hover {
+  text-decoration: underline;
+}
+```
+
+อัปเดต `apps/web/components/PostCard.tsx` ให้การ์ดเป็น `<div>` ไม่ใช่ `<Link>` โดยลิงก์โพสต์และลิงก์แต่ละ tag เป็น sibling กัน:
+
+```tsx
+import Link from 'next/link';
+import styles from './Card.module.css';
+import type { Post } from '@/lib/graphql';
+
+interface PostCardProps {
+  post: Pick<Post, 'title' | 'slug' | 'excerpt' | 'coverImage' | 'tags' | 'publishedAt'>;
+}
+
+export function PostCard({ post }: PostCardProps) {
+  return (
+    <div className={styles.card}>
+      <Link href={`/posts/${post.slug}`} className={styles.titleLink}>
+        {post.coverImage && <img className={styles.cover} src={post.coverImage} alt="" />}
+        <h2 className={styles.title}>{post.title}</h2>
+        {post.excerpt && <p className={styles.excerpt}>{post.excerpt}</p>}
+      </Link>
+      <div className={styles.meta}>
+        {post.publishedAt && <time dateTime={post.publishedAt}>{post.publishedAt}</time>}
+        {post.tags.length > 0 && (
+          <span className={styles.tags}>
+            {post.tags.map((tag, index) => (
+              <span key={tag}>
+                {index > 0 && ', '}
+                <Link href={`/tags/${tag}`}>{tag}</Link>
+              </span>
+            ))}
+          </span>
+        )}
+      </div>
+    </div>
+  );
+}
+```
+
+สร้าง `apps/web/app/tags/page.tsx`:
+
+```tsx
+import Link from 'next/link';
+import { gqlFetch } from '@/lib/graphql';
+import type { Tag } from '@/lib/graphql';
+
+const TAGS_QUERY = `
+  query Tags {
+    tags {
+      id
+      name
+      slug
+    }
+  }
+`;
+
+export default async function TagsIndexPage() {
+  const { tags } = await gqlFetch<{ tags: Tag[] }>(TAGS_QUERY, undefined, {
+    revalidate: 300,
+    tags: ['tags-list'],
+  });
+
+  return (
+    <>
+      <h1>Tags</h1>
+      <ul>
+        {tags.map((tag) => (
+          <li key={tag.id}>
+            <Link href={`/tags/${tag.slug}`}>{tag.name}</Link>
+          </li>
+        ))}
+      </ul>
+    </>
+  );
+}
+```
+
+สร้าง `apps/web/app/tags/[slug]/page.tsx`:
+
+```tsx
+import Link from 'next/link';
+import { gqlFetch } from '@/lib/graphql';
+import type { PostPage } from '@/lib/graphql';
+import { PostCard } from '@/components/PostCard';
+import styles from '@/components/PostGrid.module.css';
+
+const PAGE_SIZE = 10;
+
+const POSTS_BY_TAG_QUERY = `
+  query PostsByTag($status: PostStatus, $tag: String!, $page: Int, $pageSize: Int) {
+    posts(status: $status, tag: $tag, page: $page, pageSize: $pageSize) {
+      items {
+        id
+        title
+        slug
+        excerpt
+        coverImage
+        tags
+        publishedAt
+        author {
+          displayName
+        }
+      }
+      total
+      page
+      pageSize
+    }
+  }
+`;
+
+interface TagPageProps {
+  params: Promise<{ slug: string }>;
+  searchParams: Promise<{ page?: string }>;
+}
+
+export default async function TagPage({ params, searchParams }: TagPageProps) {
+  const { slug } = await params;
+  const { page: pageParam } = await searchParams;
+  const page = Math.max(1, Number(pageParam) || 1);
+
+  const { posts } = await gqlFetch<{ posts: PostPage }>(
+    POSTS_BY_TAG_QUERY,
+    { status: 'PUBLISHED', tag: slug, page, pageSize: PAGE_SIZE },
+    { revalidate: 60, tags: [`tag:${slug}`] },
+  );
+
+  const totalPages = Math.max(1, Math.ceil(posts.total / posts.pageSize));
+
+  return (
+    <>
+      <h1>Posts tagged &ldquo;{slug}&rdquo;</h1>
+      {posts.items.length === 0 ? (
+        <p>No posts found for this tag.</p>
+      ) : (
+        <>
+          <div className={styles.grid}>
+            {posts.items.map((post) => (
+              <PostCard key={post.id} post={post} />
+            ))}
+          </div>
+          <nav className={styles.pagination}>
+            {page > 1 && <Link href={`/tags/${slug}?page=${page - 1}`}>← Newer</Link>}
+            <span>
+              Page {page} of {totalPages}
+            </span>
+            {page < totalPages && <Link href={`/tags/${slug}?page=${page + 1}`}>Older →</Link>}
+          </nav>
+        </>
+      )}
+    </>
+  );
+}
+```
+
+- **`.titleLink { display: block; }`** แทนที่ `.card` เป็น class บน `<Link>` ด้านใน — มันต้องทำตัวเป็น block-level element แบบเดียวกับที่ anchor เดี่ยวตัวเก่าเคยเป็น เพื่อให้รูปปก, ชื่อเรื่อง, และ excerpt ยังคง stack และเต็มความกว้างของการ์ดเหมือนเดิม `.card` เองย้ายไปที่ `<div>` ด้านนอก ไม่เปลี่ยนอะไรอื่นเลย ดังนั้น border, padding, และสี hover จึงดูเหมือนเดิมทุกประการกับภาพหน้าจอของ [Styling](/devblog/th/frontend-foundations/styling/) แม้ว่า element ข้างใต้จะเปลี่ยนจาก `<a>` เป็น `<div>` ก็ตาม
+- **`styles from '@/components/PostGrid.module.css'`** — ไฟล์ CSS Module ตัวเดียวกันเป๊ะที่ [The home list](/devblog/th/public-blog/home-list/) สร้างไว้ import ผ่าน alias ระดับ component แทนที่จะเป็น path สัมพัทธ์ระดับ route อย่าง `../../page.module.css` การใช้ไฟล์ซ้ำแบบนี้หมายความว่าการเปลี่ยน `.grid` หรือ `.pagination` อัปเดตทั้งสองหน้าพร้อมกัน โดยไม่มีสำเนาที่สองให้ต้องคอยซิงก์
+- **`posts(status: $status, tag: $tag, ...)`** คือรูปร่าง query เดียวกันเป๊ะกับ `POSTS_QUERY` ของ `home-list.mdx` บวกอาร์กิวเมนต์ที่จำเป็นอีกหนึ่งตัว — resolver `PostsResolver.posts` ตัวเดียวกัน, response type `PostPage` ตัวเดียวกัน แค่ filter ต่างกัน
+- **branch สถานะว่างเปล่า** (`posts.items.length === 0`) คือรูปธรรมของประเด็นใน Why section: หน้านี้ปฏิบัติกับ tag ที่มีจริงแต่ว่างเปล่าและ tag ที่ไม่รู้จัก (โดยนัย) เหมือนกัน เพราะ `posts(tag: slug)` แยกความต่างจริง ๆ ไม่ได้เลย
+
+## Verify
+
+```bash
+cd apps/web
+npm run dev
+```
+
+เปิด `http://localhost:3000/tags` — ทุก tag จาก Verify section ของ [Tags resolver](/devblog/th/graphql-api/tags-resolver/) ควรถูกแสดงและลิงก์ไว้ คลิกอันหนึ่งไปที่ `http://localhost:3000/tags/<slug>` แล้วยืนยันว่า grid แสดงแค่โพสต์ที่มี tag นั้น
+
+ตอนนี้กลับไปที่ `http://localhost:3000` (home list) หรือหน้าโพสต์แล้วคลิก tag โดยตรงบน `PostCard` หรือบนรายการ tag ของ [Post page](/devblog/th/public-blog/post-page/) — มันควรไปที่หน้า tag ที่กรองแล้วตัวเดียวกัน เปิด element inspector ของ browser บนการ์ดแล้วยืนยันว่าไม่มี `<a>` ซ้อนอยู่ข้างใน `<a>` อีกตัวที่ไหนใน markup เลย — การ์ดด้านนอกเป็น `<div>`, บล็อกชื่อเรื่อง/รูปปก/excerpt เป็น `<a>` หนึ่งตัว, และแต่ละ tag เป็น `<a>` แยกของตัวเอง ทั้งหมดในฐานะ sibling กัน
+
+สุดท้าย เข้า slug ที่ไม่มี tag จริงอยู่ข้างหลังเลย:
+
+```bash
+curl -s -o /dev/null -w '%{http_code}\n' http://localhost:3000/tags/not-a-real-tag
+```
+
+```txt
+200
+```
+
+`200` ไม่ใช่ `404` — ยืนยันว่าหน้าเรนเดอร์ข้อความ "No posts found for this tag" แทนที่จะปฏิบัติกับ slug ที่ไม่รู้จักเป็น error
+
+## Recap
+
+`app/tags/[slug]/page.tsx` เอารูปร่าง query `posts` ของ `home-list.mdx` มาใช้ซ้ำเป๊ะ บวก filter `tag` เข้าไป, ISR และรูปแบบการแบ่งหน้าเดียวกัน และสถานะว่างเปล่าที่ตรงไปตรงมาแทนที่การเรียก `notFound()` ที่ไม่มีเหตุผลรองรับพอ — `posts(tag: slug)` แยกความต่างระหว่าง tag จริงที่ว่างเปล่ากับพิมพ์ผิดไม่ได้ `app/tags/page.tsx` แสดงทุก `Tag` จาก query `tags` ที่ไม่ต้องมี guard `PostCard` เปลี่ยนจาก anchor ก้อนเดียวเป็น `<div>` ที่ห่อ `<Link>` ของชื่อเรื่อง/รูปปก/excerpt และ `<Link>` แยกต่อ tag แก้สิ่งที่จะกลายเป็น HTML แบบ nested-anchor ที่ไม่ถูกต้องทันทีที่ tag กลายเป็นสิ่งที่คลิกได้ — การเตือนความจำเล็ก ๆ ที่เป็นรูปธรรมว่า component ที่สร้างมาสำหรับ interaction pattern หนึ่งบางครั้งต้องการการปรับโครงสร้างจริง ๆ ไม่ใช่แค่เพิ่ม `href` เมื่อมี interaction pattern ที่สองซ้อนทับเข้ามา
+
+ถัดไป: [SEO, RSS & sitemap →](/devblog/th/public-blog/seo-rss/)
