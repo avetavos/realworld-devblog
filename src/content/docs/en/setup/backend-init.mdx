@@ -1,0 +1,125 @@
+---
+title: Backend Init
+description: "Scaffold the NestJS API with the Nest CLI, install the GraphQL/Mongoose/auth/validation dependencies, and read API_PORT from the root .env in main.ts."
+sidebar:
+  order: 2
+---
+
+## What we're building
+
+A NestJS application at `apps/api`, wired to read its port from the monorepo's root `.env` through `@nestjs/config`, with every dependency the rest of the course needs already installed.
+
+## Why
+
+The Nest CLI (`nest new`) generates the module/controller/service structure, `tsconfig.json`, and test setup that every later lesson builds on — writing that boilerplate by hand buys nothing and risks a subtly different config than the one the rest of the course assumes. `@nestjs/config` centralizes environment access behind a typed `ConfigService` instead of scattering raw `process.env` reads through the codebase.
+
+## Pros & cons
+
+**`nest new` vs. a manual `npm init`.** The CLI wires up ESLint, Jest, `tsconfig.json`, and the Nest-specific `nest-cli.json` in one step, and every scaffold looks the same — which matters when you're following a course. The cost is that it also assumes a standalone project: by default it initializes its own git repo, which you don't want inside a monorepo that already has its own `git init` at the root. `--skip-git` avoids a nested repository; `--package-manager npm` avoids an interactive prompt.
+
+**Installing dependencies as one group vs. as you need them.** Installing everything now (GraphQL, Mongoose, auth, validation) means every later module's `npm install` step is already done, and one `package-lock.json` is generated once. The trade-off is a longer initial install and a `package.json` that has GraphQL and auth dependencies before any resolver or guard exists yet — acceptable here because the course's dependency list is fixed and known up front.
+
+## Set it up
+
+Scaffold the API into `apps/api`, skipping a nested git repo since the monorepo root already has one:
+
+```bash
+cd devblog
+nest new apps/api --package-manager npm --skip-git
+cd apps/api
+```
+
+`nest new` already added `@nestjs/core`, `@nestjs/common`, and `@nestjs/platform-express` to `package.json` — no need to install those again. Install the rest, grouped by what each group is for:
+
+```bash
+# env vars from the root .env, via ConfigService
+npm install @nestjs/config
+
+# code-first GraphQL, served at /graphql by Apollo Server
+npm install @nestjs/graphql @nestjs/apollo @apollo/server graphql
+
+# MongoDB models and schemas via Mongoose
+npm install @nestjs/mongoose mongoose
+
+# JWT auth: Passport strategy, JWT signing/verification, password hashing
+npm install @nestjs/passport passport passport-jwt @nestjs/jwt bcrypt
+
+# DTO and GraphQL input validation
+npm install class-validator class-transformer
+
+# deterministic, URL-safe post slugs
+npm install slugify
+
+# type definitions for the auth packages above
+npm install -D @types/passport-jwt @types/bcrypt
+```
+
+Update `src/app.module.ts` to load the root `.env` globally:
+
+```ts
+import { Module } from '@nestjs/common';
+import { ConfigModule } from '@nestjs/config';
+import { AppController } from './app.controller';
+import { AppService } from './app.service';
+
+@Module({
+  imports: [
+    ConfigModule.forRoot({
+      isGlobal: true,
+      envFilePath: '../../.env',
+    }),
+  ],
+  controllers: [AppController],
+  providers: [AppService],
+})
+export class AppModule {}
+```
+
+`envFilePath` is resolved relative to where the Nest process runs (`apps/api`), so `../../.env` points at `devblog/.env` — the file [Repo layout](/devblog/en/setup/repo-layout/) created. `isGlobal: true` means any later module can inject `ConfigService` without re-importing `ConfigModule`.
+
+Update `src/main.ts` to listen on `API_PORT` instead of a hardcoded port:
+
+```ts
+import { NestFactory } from '@nestjs/core';
+import { ConfigService } from '@nestjs/config';
+import { AppModule } from './app.module';
+
+async function bootstrap() {
+  const app = await NestFactory.create(AppModule);
+  const configService = app.get(ConfigService);
+  const port = configService.get<number>('API_PORT') ?? 4000;
+  await app.listen(port);
+  console.log(`API listening on http://localhost:${port}`);
+}
+bootstrap();
+```
+
+Start it in watch mode:
+
+```bash
+npm run start:dev
+```
+
+## Verify
+
+The console should print the Nest bootstrap log ending with your custom line:
+
+```txt
+[Nest] ... LOG [NestApplication] Nest application successfully started
+API listening on http://localhost:4000
+```
+
+In another terminal:
+
+```bash
+curl http://localhost:4000
+# Hello World!
+```
+
+`Hello World!` is the default response from the scaffolded `AppController`/`AppService` pair — seeing it confirms the app boots, `ConfigService` read `API_PORT` correctly (4000, from `.env`), and the HTTP server is reachable.
+
+## Recap
+
+`apps/api` is a Nest CLI–scaffolded application with every course dependency installed up front, grouped by purpose: `@nestjs/config` for environment access, GraphQL/Apollo for the API layer, Mongoose for MongoDB, Passport/JWT/bcrypt for auth, class-validator/class-transformer for validation, and slugify for post slugs. `main.ts` now reads its port from the root `.env` via a typed `ConfigService` instead of a hardcoded number, and `npm run start:dev` confirms it boots on port 4000.
+
+Next: [Frontend init →](/devblog/en/setup/frontend-init/)

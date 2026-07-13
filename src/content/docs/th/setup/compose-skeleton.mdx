@@ -1,0 +1,80 @@
+---
+title: Compose Skeleton
+description: "docker-compose.yml บางส่วนที่รันเฉพาะ MongoDB พร้อม named volume และ healthcheck ผ่าน mongosh — API กับเว็บแอปจะเข้าร่วมในโมดูลถัดไป"
+sidebar:
+  order: 4
+---
+
+## What we're building
+
+`infra/docker-compose.yml` ที่รันเซอร์วิสเดียวตอนนี้: `mongo` พร้อม root credential ที่ทั้ง `MONGODB_URI` และการเชื่อมต่อ Mongoose ในภายหลังคาดหวัง named volume เพื่อให้ข้อมูลอยู่รอดแม้คอนเทนเนอร์รีสตาร์ต และ healthcheck
+
+## Why
+
+API กับเว็บแอปยังไม่ถูกต่อเข้ากับ Compose — พวกมันยังรันในเครื่องผ่าน `npm run start:dev` และ `npm run dev` เชื่อมกับ MongoDB ตัวไหนก็ตามที่เข้าถึงได้ การตั้ง Mongo ขึ้นมาเองก่อนหมายความว่าคุณตรวจสอบฐานข้อมูลแบบแยกเดี่ยวได้ ด้วย `docker compose ps` และ `mongosh` ก่อนที่โค้ดแอปพลิเคชันใด ๆ จะพึ่งพามัน `apps/api` และ `apps/web` จะเข้าร่วมไฟล์นี้ในโมดูล 12
+
+## Pros & cons
+
+**ไฟล์ compose บางส่วนตอนนี้ เทียบกับสแตกเต็มตั้งแต่วันแรก** การเพิ่มเซอร์วิส `api` และ `web` ทันทีหมายความว่าทุกการเปลี่ยนโค้ดต้องผ่านลูป rebuild-แล้ว-restart ผ่าน Docker ซึ่งช้ากว่า hot reload ของ `npm run start:dev` — และ ณ จุดนี้ของคอร์สก็ยังไม่มีอะไรให้ containerize อยู่แล้ว การเริ่มด้วย `mongo` อย่างเดียวให้ฐานข้อมูลที่เสถียรและทิ้งได้ โดยไม่เสียความเร็วในการวนรอบพัฒนาโค้ดแอปในเครื่องเลย
+
+**named volume เทียบกับ bind mount สำหรับข้อมูลของ Mongo** named volume (`mongodata`) ถูกจัดการทั้งหมดโดย Docker — มันอยู่รอดหลัง `docker compose down` (ที่ไม่มี `-v`) ไม่ทำให้ไฟล์ฐานข้อมูลกระจายเข้ามาใน working tree ของคุณ และเลี่ยงปัญหาสิทธิ์ไฟล์และการแยกตัวพิมพ์เล็กใหญ่ที่ bind mount เจอได้บน macOS bind mount (`./data:/data/db`) ให้คุณเข้าถึงไฟล์ดิบบน host โดยตรง ซึ่งบางครั้งมีประโยชน์เวลาตรวจดูด้วยมือ แต่ผูกคอนเทนเนอร์เข้ากับ path บน host บทเรียนนี้ใช้ named volume
+
+## Set it up
+
+สร้าง `infra/docker-compose.yml`:
+
+```yaml
+services:
+  mongo:
+    image: mongo:7
+    environment:
+      MONGO_INITDB_ROOT_USERNAME: devblog
+      MONGO_INITDB_ROOT_PASSWORD: devblog
+    ports:
+      - "27017:27017"
+    volumes:
+      - mongodata:/data/db
+    healthcheck:
+      test: ["CMD", "mongosh", "--eval", "db.adminCommand('ping')"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+
+volumes:
+  mongodata: {}
+```
+
+`MONGO_INITDB_ROOT_USERNAME`/`MONGO_INITDB_ROOT_PASSWORD` คือตัวแปร bootstrap ของ image Mongo ทางการ: ตอนสตาร์ต**ครั้งแรก**ด้วย data directory ที่ว่างเปล่า entrypoint script จะสร้าง root user ด้วย credential เหล่านี้ในฐานข้อมูล `admin` พิเศษ นี่คือเหตุผลที่ `MONGODB_URI` ใน `.env.example` ลงท้ายด้วย `?authSource=admin` — มันบอก Mongoose driver ให้ยืนยันตัวตนกับฐานข้อมูล `admin` ที่ root user ตัวนี้อยู่จริง ไม่ใช่กับฐานข้อมูล `devblog` ในส่วน path ก่อนหน้า การละ `authSource=admin` จะทำให้ทุกความพยายามเชื่อมต่อล้มเหลวด้วย authentication error แม้ username และ password จะถูกต้องก็ตาม
+
+ยกฐานข้อมูลขึ้นมา:
+
+```bash
+cd devblog/infra
+docker compose up -d mongo
+```
+
+## Verify
+
+```bash
+docker compose ps
+# NAME            IMAGE      STATUS
+# infra-mongo-1   mongo:7    Up (healthy)
+```
+
+รอสักครู่ให้ `start_period` ผ่านไปถ้ายังขึ้น `(health: starting)` จากนั้นยืนยันว่ายืนยันตัวตนด้วย root user ได้:
+
+```bash
+docker compose exec mongo mongosh -u devblog -p devblog --eval "db.adminCommand('ping')"
+# { ok: 1 }
+```
+
+`{ ok: 1 }` ยืนยันว่าคอนเทนเนอร์ขึ้นแล้ว root user ถูกสร้างด้วย credential จาก `.env.example` และเซิร์ฟเวอร์ตอบสนองคำสั่งได้ — เป็นการจับมือแบบเดียวกับที่ `MONGODB_URI` จะทำเมื่อ `apps/api` เชื่อมต่อผ่าน Mongoose ในโมดูลถัดไป
+
+## Recap
+
+`infra/docker-compose.yml` รัน `mongo:7` เดี่ยว ๆ พร้อม seed root user `devblog`/`devblog` ผ่าน `MONGO_INITDB_ROOT_USERNAME`/`MONGO_INITDB_ROOT_PASSWORD` เก็บข้อมูลใน named volume `mongodata` และรายงานสถานะผ่าน `mongosh --eval` check `docker compose ps` และ `mongosh --eval` ping ที่ยืนยันตัวตนแล้วทั้งคู่ยืนยันว่ามันพร้อม API และเว็บแอปเชื่อมต่อกับ instance เดียวกันนี้ในเครื่องตลอดคอร์สที่เหลือ และจะเข้าร่วมไฟล์ Compose นี้เองในโมดูล 12
+
+เมื่อ monorepo ถูก scaffold แล้ว API บูตขึ้นที่พอร์ต 4000 เว็บแอปบูตขึ้นที่พอร์ต 3000 และ MongoDB รันอยู่และเข้าถึงได้ โมดูล 1 ก็เสร็จสมบูรณ์ — คุณมี toolchain ในเครื่องที่ใช้งานได้สำหรับทุกอย่างที่ตามมา
+
+ถัดไป: [Data Modeling →](/devblog/th/data-modeling/)

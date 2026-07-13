@@ -1,0 +1,109 @@
+---
+title: Repo Layout
+description: "สร้างโครง monorepo devblog/ — apps/api, apps/web, infra/ — พร้อม .gitignore และ .env.example ที่ทุกโมดูลถัดไปต้องพึ่งพา"
+sidebar:
+  order: 1
+---
+
+## What we're building
+
+repository เดียวชื่อ `devblog/` ที่เก็บทั้งสองแอปและโครงสร้างพื้นฐานที่ใช้ร่วมกัน:
+
+```txt
+devblog/
+├── apps/
+│   ├── api/              # NestJS GraphQL API (scaffolded in the next lesson)
+│   └── web/               # Next.js App Router front end (scaffolded in Lesson 3)
+├── infra/                 # Docker Compose files for local development
+├── .env                   # local secrets — never committed
+├── .env.example            # committed template, documents every variable
+└── .gitignore
+```
+
+บทเรียนนี้สร้างโครงและไฟล์ระดับ root สองไฟล์ ส่วน `apps/api` และ `apps/web` จะถูก scaffold โดย CLI ของตัวมันเองในสองบทเรียนถัดไป ที่นี่เราจึงสร้างแค่โฟลเดอร์แม่ของมัน
+
+## Why
+
+ทุกโมดูลถัดไปแก้ไขทั้ง `apps/api` และ `apps/web` และทั้งสองต้องเห็นพ้องกันในสัญญาเดียวกัน: JWT secret, connection string ของ Mongo และ URL ของ API ที่ฝั่งหน้าบ้านเรียก การเก็บทั้งสองไว้ใน repository เดียว พร้อม root `.env` ไฟล์เดียว ทำให้สัญญานั้นเบี่ยงเบนไม่ได้ — มีไฟล์เดียวที่ต้องอัปเดตเมื่อค่าเปลี่ยน และ `git log` เดียวที่แสดงว่า API กับ UI พัฒนาไปด้วยกันอย่างไร
+
+## Pros & cons
+
+**สิ่งที่ monorepo ให้คุณตรงนี้** `.env` และ `.gitignore` ไฟล์เดียวที่ใช้ร่วมกันทั้งสองแอป `infra/docker-compose.yml` ไฟล์เดียวที่ orchestrate ฐานข้อมูล API และเว็บแอปพร้อมกันได้ commit แบบ atomic — การเปลี่ยนฟิลด์ GraphQL กับ query ฝั่งหน้าบ้านที่อ่านมันลงใน commit เดียว ไม่ใช่สอง pull request ที่ต้อง merge ให้ถูกลำดับ `git clone` ครั้งเดียวก็ได้ระบบทั้งหมดให้ผู้ร่วมงานใหม่
+
+**สิ่งที่มันแลกมา** release ของสองแอปผูกติดกับประวัติ repository เดียวกัน แม้ว่าโดยหลักการแล้วมันจะ deploy แยกกันได้ ประวัติ git ปนกันระหว่างเรื่องของ API และ UI CI ต้องฉลาดเรื่อง path (การเปลี่ยนใน `apps/web/` ไม่ควรทำให้ต้อง rebuild `apps/api/`) ไม่งั้นจะเสียเวลา rebuild ทุกอย่างในทุก commit
+
+**ทางเลือกอื่น — polyrepo** repository แยกกันสำหรับ `api`, `web` และ `infra` ให้แต่ละตัว versioning อิสระ CI pipeline ของตัวเอง และขอบเขตความเป็นเจ้าของที่ชัดเจนถ้าแต่ละทีมดูแลคนละส่วน ต้นทุนคือสิ่งที่ monorepo ให้คุณพอดี: การให้สัญญา JWT/env ตรงกันตอนนี้ต้องประสานการเปลี่ยนแปลงข้าม repository และไม่มีคำสั่งเดียวที่ยกทั้งสแตกขึ้นมาให้ผู้ร่วมงานใหม่
+
+สำหรับโปรเจกต์สองแอปที่ใช้สัญญา API เดียวและ workflow dev ในเครื่องเดียวกัน monorepo คือทางเลือกที่ถูกต้อง DevBlog ใช้แบบเดียว
+
+## Set it up
+
+สร้างโฟลเดอร์ระดับบนสุดและเริ่ม git:
+
+```bash
+mkdir -p devblog/apps devblog/infra
+cd devblog
+git init
+```
+
+สร้าง `.gitignore` ที่ root ของ repo:
+
+```txt
+node_modules/
+dist/
+build/
+.next/
+out/
+coverage/
+*.log
+.DS_Store
+.env
+.env.local
+```
+
+`.env.example` ตั้งใจ**ไม่**อยู่ในลิสต์นี้ — เพราะไม่มีความลับใด ๆ และต้องถูก track ไว้เพื่อให้ผู้ร่วมงานทุกคนรู้ว่าต้องตั้งตัวแปรอะไรบ้าง
+
+สร้าง `.env.example` ที่ root ของ repo พร้อมตัวแปรทุกตัวที่สแตกต้องการ:
+
+```txt
+MONGODB_URI=mongodb://devblog:devblog@localhost:27017/devblog?authSource=admin
+JWT_SECRET=change-me-in-prod
+API_PORT=4000
+WEB_ORIGIN=http://localhost:3000
+NEXT_PUBLIC_API_URL=http://localhost:4000/graphql
+```
+
+แต่ละตัวแปรมีไว้ทำอะไร:
+
+- **`MONGODB_URI`** — connection string ที่ Mongoose ใช้เชื่อมต่อ MongoDB credential `devblog:devblog` และ `authSource=admin` ตรงกับ root user ที่คุณจะสร้างให้คอนเทนเนอร์ Mongo ใน [Compose skeleton](/devblog/th/setup/compose-skeleton/)
+- **`JWT_SECRET`** — secret ที่ Passport-JWT ใช้เซ็นและตรวจสอบ auth token ของผู้เขียน `change-me-in-prod` เป็นแค่ placeholder; การ deploy จริงต้อง override ด้วยค่าสุ่มยาว ๆ
+- **`API_PORT`** — พอร์ตที่ NestJS API รันฟัง อ่านผ่าน `@nestjs/config` ใน `main.ts` ครอบคลุมใน [Backend init](/devblog/th/setup/backend-init/)
+- **`WEB_ORIGIN`** — origin ที่ API อนุญาตให้เรียก (คือแอป Next.js) ใช้เมื่อตั้งค่า CORS ในโมดูลถัดไป
+- **`NEXT_PUBLIC_API_URL`** — GraphQL endpoint ที่แอป Next.js เรียก คำนำหน้า `NEXT_PUBLIC_` เป็นข้อตกลงของ Next.js ที่ทำให้ตัวแปรอ่านได้จากโค้ดฝั่ง client ด้วย ไม่ใช่แค่ฝั่ง server
+
+สุดท้าย คัดลอก template ไปเป็น `.env` จริงที่ถูก gitignore — ไฟล์นี้คือไฟล์ที่ process ในเครื่องของคุณอ่านจริง ๆ:
+
+```bash
+cp .env.example .env
+```
+
+## Verify
+
+```bash
+ls -la devblog
+# .env  .env.example  .gitignore  apps  infra  .git
+
+cat devblog/.env.example
+# (prints the five variables above)
+
+cd devblog && git status
+# .env is not listed (ignored); .env.example, .gitignore are untracked and ready to commit
+```
+
+ถ้า `.env` **ไม่** ปรากฏใน `git status` แต่ `.env.example` ปรากฏ แสดงว่า `.gitignore` ของคุณทำงานถูกต้อง
+
+## Recap
+
+`devblog/` เป็น monorepo ที่มี `apps/api`, `apps/web` และ `infra/` เป็นพี่น้องกัน พร้อม root `.gitignore` และ `.env.example` monorepo แลก deployment อิสระต่อแอปกับ single source of truth บนสัญญา JWT/Mongo/API-URL ที่ทั้งสองแอปใช้ร่วมกัน — เป็นการตัดสินใจที่ถูกต้องสำหรับสองแอปที่สร้างไปด้วยกัน `.env.example` เอกสารตัวแปรทุกตัว; `.env` จริงเก็บความลับในเครื่องและไม่ถูก commit เลย
+
+ถัดไป: [Backend init →](/devblog/th/setup/backend-init/)

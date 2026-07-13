@@ -1,0 +1,125 @@
+---
+title: Backend Init
+description: "สร้างโครง NestJS API ด้วย Nest CLI ติดตั้ง dependency ของ GraphQL/Mongoose/auth/validation แล้วอ่าน API_PORT จาก root .env ใน main.ts"
+sidebar:
+  order: 2
+---
+
+## What we're building
+
+แอปพลิเคชัน NestJS ที่ `apps/api` ต่อสายให้อ่านพอร์ตจาก root `.env` ของ monorepo ผ่าน `@nestjs/config` พร้อม dependency ทุกตัวที่คอร์สที่เหลือต้องการติดตั้งไว้แล้ว
+
+## Why
+
+Nest CLI (`nest new`) สร้างโครงสร้าง module/controller/service, `tsconfig.json` และการตั้งค่าเทสต์ที่ทุกบทเรียนถัดไปต่อยอด — เขียน boilerplate นั้นเองไม่ได้อะไรเพิ่มและเสี่ยงได้ config ที่ต่างจากที่คอร์สที่เหลือคาดหวังไว้เล็กน้อย `@nestjs/config` รวมการเข้าถึง environment ไว้ที่เดียวผ่าน `ConfigService` ที่มี type แทนที่จะกระจายการอ่าน `process.env` ดิบ ๆ ไปทั่วโค้ด
+
+## Pros & cons
+
+**`nest new` เทียบกับ `npm init` เอง** CLI ต่อสาย ESLint, Jest, `tsconfig.json` และ `nest-cli.json` เฉพาะของ Nest ให้ในขั้นตอนเดียว และทุก scaffold มีหน้าตาเหมือนกัน — ซึ่งสำคัญเมื่อคุณกำลังเรียนตามคอร์ส ต้นทุนคือมันสมมติว่าเป็นโปรเจกต์เดี่ยว ๆ ด้วย: ค่าเริ่มต้นมันจะสร้าง git repo ของตัวเอง ซึ่งคุณไม่ต้องการใน monorepo ที่มี `git init` ของตัวเองที่ root อยู่แล้ว `--skip-git` เลี่ยง repository ที่ซ้อนกัน `--package-manager npm` เลี่ยง prompt แบบโต้ตอบ
+
+**ติดตั้ง dependency เป็นกลุ่มเดียวเทียบกับติดตั้งทีละตัวตามที่ใช้** ติดตั้งทุกอย่างตอนนี้ (GraphQL, Mongoose, auth, validation) หมายความว่าขั้นตอน `npm install` ของทุกโมดูลถัดไปเสร็จไปแล้ว และ `package-lock.json` เดียวถูกสร้างครั้งเดียว สิ่งที่แลกคือการติดตั้งครั้งแรกนานขึ้นและ `package.json` ที่มี dependency ของ GraphQL และ auth ก่อนที่ resolver หรือ guard ใด ๆ จะมีอยู่จริง — ยอมรับได้ที่นี่เพราะลิสต์ dependency ของคอร์สคงที่และรู้ล่วงหน้าอยู่แล้ว
+
+## Set it up
+
+Scaffold API เข้าไปที่ `apps/api` โดยข้าม git repo ที่ซ้อนกัน เพราะ root ของ monorepo มี git ของตัวเองอยู่แล้ว:
+
+```bash
+cd devblog
+nest new apps/api --package-manager npm --skip-git
+cd apps/api
+```
+
+`nest new` เพิ่ม `@nestjs/core`, `@nestjs/common` และ `@nestjs/platform-express` ลงใน `package.json` ให้แล้ว — ไม่ต้องติดตั้งซ้ำ ติดตั้งที่เหลือ จัดกลุ่มตามว่าแต่ละกลุ่มมีไว้ทำอะไร:
+
+```bash
+# env vars from the root .env, via ConfigService
+npm install @nestjs/config
+
+# code-first GraphQL, served at /graphql by Apollo Server
+npm install @nestjs/graphql @nestjs/apollo @apollo/server graphql
+
+# MongoDB models and schemas via Mongoose
+npm install @nestjs/mongoose mongoose
+
+# JWT auth: Passport strategy, JWT signing/verification, password hashing
+npm install @nestjs/passport passport passport-jwt @nestjs/jwt bcrypt
+
+# DTO and GraphQL input validation
+npm install class-validator class-transformer
+
+# deterministic, URL-safe post slugs
+npm install slugify
+
+# type definitions for the auth packages above
+npm install -D @types/passport-jwt @types/bcrypt
+```
+
+แก้ `src/app.module.ts` ให้โหลด root `.env` แบบ global:
+
+```ts
+import { Module } from '@nestjs/common';
+import { ConfigModule } from '@nestjs/config';
+import { AppController } from './app.controller';
+import { AppService } from './app.service';
+
+@Module({
+  imports: [
+    ConfigModule.forRoot({
+      isGlobal: true,
+      envFilePath: '../../.env',
+    }),
+  ],
+  controllers: [AppController],
+  providers: [AppService],
+})
+export class AppModule {}
+```
+
+`envFilePath` ถูก resolve โดยอ้างอิงจากตำแหน่งที่ process ของ Nest รันอยู่ (`apps/api`) ดังนั้น `../../.env` จึงชี้ไปที่ `devblog/.env` — ไฟล์ที่ [Repo layout](/devblog/th/setup/repo-layout/) สร้างไว้ `isGlobal: true` หมายความว่าโมดูลไหนในภายหลังก็ inject `ConfigService` ได้โดยไม่ต้อง import `ConfigModule` ซ้ำ
+
+แก้ `src/main.ts` ให้ฟังที่ `API_PORT` แทนพอร์ตที่ hardcode ไว้:
+
+```ts
+import { NestFactory } from '@nestjs/core';
+import { ConfigService } from '@nestjs/config';
+import { AppModule } from './app.module';
+
+async function bootstrap() {
+  const app = await NestFactory.create(AppModule);
+  const configService = app.get(ConfigService);
+  const port = configService.get<number>('API_PORT') ?? 4000;
+  await app.listen(port);
+  console.log(`API listening on http://localhost:${port}`);
+}
+bootstrap();
+```
+
+สตาร์ตแบบ watch mode:
+
+```bash
+npm run start:dev
+```
+
+## Verify
+
+คอนโซลควรพิมพ์ log การ bootstrap ของ Nest จบด้วยบรรทัดที่คุณเพิ่มเอง:
+
+```txt
+[Nest] ... LOG [NestApplication] Nest application successfully started
+API listening on http://localhost:4000
+```
+
+ในอีก terminal หนึ่ง:
+
+```bash
+curl http://localhost:4000
+# Hello World!
+```
+
+`Hello World!` คือ response ค่าเริ่มต้นจากคู่ `AppController`/`AppService` ที่ scaffold มาให้ — การเห็นมันยืนยันว่าแอปบูตขึ้นสำเร็จ `ConfigService` อ่าน `API_PORT` ถูกต้อง (4000 จาก `.env`) และ HTTP server เข้าถึงได้
+
+## Recap
+
+`apps/api` คือแอปที่ Nest CLI scaffold ให้ พร้อม dependency ของคอร์สทุกตัวติดตั้งไว้ล่วงหน้า จัดกลุ่มตามหน้าที่: `@nestjs/config` สำหรับเข้าถึง environment, GraphQL/Apollo สำหรับเลเยอร์ API, Mongoose สำหรับ MongoDB, Passport/JWT/bcrypt สำหรับ auth, class-validator/class-transformer สำหรับ validation และ slugify สำหรับ slug ของโพสต์ ตอนนี้ `main.ts` อ่านพอร์ตจาก root `.env` ผ่าน `ConfigService` ที่มี type แทนตัวเลขที่ hardcode และ `npm run start:dev` ยืนยันว่ามันบูตขึ้นที่พอร์ต 4000
+
+ถัดไป: [Frontend init →](/devblog/th/setup/frontend-init/)

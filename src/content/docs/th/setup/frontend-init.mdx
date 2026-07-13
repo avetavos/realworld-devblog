@@ -1,0 +1,84 @@
+---
+title: Frontend Init
+description: "สร้างโครงโปรเจกต์ Next.js App Router ด้วย create-next-app ติดตั้ง GraphQL client และตัวเรนเดอร์ Markdown แล้วชี้ไปที่ API ผ่าน NEXT_PUBLIC_API_URL"
+sidebar:
+  order: 3
+---
+
+## What we're building
+
+แอปพลิเคชัน Next.js ที่ `apps/web` ใช้ **App Router** พร้อมโฟลเดอร์ `app/` อยู่ระดับบนสุด (ไม่มี `src/`) ชี้ไปที่ NestJS API ผ่าน `NEXT_PUBLIC_API_URL`
+
+## Why
+
+[Architecture](/devblog/th/introduction/architecture/) เลือกใช้ App Router ไว้แล้ว: Server Component ดึงข้อมูลจาก GraphQL API บนฝั่งเซิร์ฟเวอร์สำหรับเส้นทางอ่านที่แคชได้และเป็นสาธารณะ ส่วน Client Component ถือ session ของ admin สำหรับเส้นทางเขียนที่ยืนยันด้วย JWT `create-next-app` สร้างโครงสร้างนั้นให้โดยตรง แทนที่คุณจะประกอบมันเองด้วยมือ
+
+## Pros & cons
+
+**App Router เทียบกับ Pages Router** App Router ให้ React Server Component — คอมโพเนนต์ที่รันบนเซิร์ฟเวอร์ ดึงข้อมูลได้โดยตรง และไม่ส่งโค้ดของมันไปที่ browser เลย — บวกกับ layout ซ้อนกันและ revalidation ต่อ segment ซึ่งตรงกับโมเดล ISR ที่บทเรียน architecture อธิบายไว้พอดี Pages Router รุ่นเก่าเรียบง่ายกว่าและไม่มีการแบ่ง server/client component ให้ต้องคิด แต่ก็ไม่มี Server Component เช่นกัน ดังนั้นการดึงข้อมูลทุกครั้งต้องเกิดใน `getServerSideProps`/`getStaticProps` หรือฝั่ง client สำหรับคอร์สที่สร้างรอบ SSR/ISR App Router คือทางเลือกจริงเพียงทางเดียว
+
+**`src/` เทียบกับไม่มี `src/`** โฟลเดอร์ `src/` แยกโค้ดแอปออกจากไฟล์ config ระดับ root (`next.config.ts`, `package.json`) — มีประโยชน์ในโปรเจกต์ใหญ่ที่มีไฟล์ระดับบนสุดเยอะ `apps/web` ถูก namespace อยู่ใน monorepo `devblog/` อยู่แล้ว การแยกแบบนั้นจึงให้ประโยชน์น้อยลงตรงนี้ คอร์สนี้เก็บ `app/` ไว้ที่ระดับบนสุดของ `apps/web` แบบเดียวกันตลอดทุกบทเรียนที่แตะฝั่งหน้าบ้าน
+
+## Set it up
+
+Scaffold แอปเข้าไปที่ `apps/web` แบบไม่โต้ตอบ:
+
+```bash
+cd devblog
+npx create-next-app@latest apps/web --typescript --app --no-src-dir --no-tailwind --eslint --import-alias "@/*" --use-npm
+cd apps/web
+```
+
+ติดตั้ง dependency สองตัวที่คอร์สนี้ต้องการเพิ่มเติมจากที่ `create-next-app` ติดตั้งให้แล้ว:
+
+```bash
+# graphql-request: a minimal client for calling the NestJS GraphQL API
+# react-markdown + remark-gfm: render a post's Markdown body, including GFM tables/strikethrough
+npm install graphql-request react-markdown remark-gfm
+```
+
+สร้าง `apps/web/.env.local` เพื่อให้แอปรู้ว่า API อยู่ที่ไหน:
+
+```txt
+NEXT_PUBLIC_API_URL=http://localhost:4000/graphql
+```
+
+ค่านี้ตรงกับ `.env.example` ที่ root จาก [Repo layout](/devblog/th/setup/repo-layout/) `.env.local` เป็นข้อตกลงของ Next.js — มันถูก gitignore โดย `.gitignore` ของ scaffold เองอยู่แล้ว และชนะไฟล์ env อื่น ๆ เสมอตอน dev ในเครื่อง
+
+สตาร์ต dev server:
+
+```bash
+npm run dev
+```
+
+## Verify
+
+```txt
+Open http://localhost:3000
+# The default Next.js starter page loads, with a live-reloading dev server in the terminal
+```
+
+โครง `app/` ที่ได้ สด ๆ จาก scaffold:
+
+```txt
+apps/web/
+├── app/
+│   ├── favicon.ico
+│   ├── globals.css
+│   ├── layout.tsx        # root layout — wraps every page, holds <html>/<body>
+│   └── page.tsx           # the "/" route
+├── public/
+├── .env.local
+├── next.config.ts
+├── package.json
+├── tsconfig.json
+└── eslint.config.mjs
+```
+
+(ไฟล์ที่ได้จริงอาจต่างกันเล็กน้อยตามเวอร์ชัน Next.js ที่คุณติดตั้ง — ส่วนที่สำคัญคือโฟลเดอร์ `app/` ที่มี `layout.tsx` และ `page.tsx`)
+
+## Recap
+
+`apps/web` คือโปรเจกต์ Next.js App Router ที่ scaffold ด้วย `create-next-app --app --no-src-dir` พร้อมติดตั้ง `graphql-request` และ `react-markdown`/`remark-gfm` สำหรับเรียก API และเรนเดอร์เนื้อหาโพสต์ `NEXT_PUBLIC_API_URL` ใน `.env.local` ชี้ไปที่ `http://localhost:4000/graphql` ตรงกับพอร์ตของ API จาก [Backend init](/devblog/th/setup/backend-init/) `npm run dev` ยืนยันว่ามันบูตขึ้นที่พอร์ต 3000
+
+ถัดไป: [Compose skeleton →](/devblog/th/setup/compose-skeleton/)

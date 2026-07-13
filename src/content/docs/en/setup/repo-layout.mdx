@@ -1,0 +1,109 @@
+---
+title: Repo Layout
+description: "Scaffold the devblog/ monorepo — apps/api, apps/web, infra/ — plus the root .gitignore and .env.example that every later module depends on."
+sidebar:
+  order: 1
+---
+
+## What we're building
+
+A single repository named `devblog/` that holds both apps and their shared infrastructure:
+
+```txt
+devblog/
+├── apps/
+│   ├── api/              # NestJS GraphQL API (scaffolded in the next lesson)
+│   └── web/               # Next.js App Router front end (scaffolded in Lesson 3)
+├── infra/                 # Docker Compose files for local development
+├── .env                   # local secrets — never committed
+├── .env.example            # committed template, documents every variable
+└── .gitignore
+```
+
+This lesson creates the skeleton and the two root files. `apps/api` and `apps/web` are scaffolded by their own CLIs in the next two lessons, so we only create their parent folders here.
+
+## Why
+
+Every later module edits both `apps/api` and `apps/web`, and both need to agree on the same contract: the JWT secret, the Mongo connection string, and the API URL the front end calls. Keeping them in one repository, with one root `.env`, makes that contract impossible to drift — there is only one file to update when a value changes, and one `git log` that shows how the API and the UI evolved together.
+
+## Pros & cons
+
+**What a monorepo buys you here.** A single `.env` and `.gitignore` shared by both apps. A single `infra/docker-compose.yml` that can orchestrate the database, the API, and the web app together. Atomic commits — a change to a GraphQL field and the front-end query that reads it lands in one commit, not two pull requests that have to be merged in the right order. One `git clone` gets a new contributor the whole system.
+
+**What it costs you.** The two apps' releases are coupled to the same repository history, even though they could in principle deploy independently. The git history mixes API and UI concerns. CI has to be smart about paths (a change under `apps/web/` should not necessarily rebuild `apps/api/`) or it wastes time rebuilding everything on every commit.
+
+**The alternative — polyrepo.** Separate repositories for `api`, `web`, and `infra` give each one independent versioning, its own CI pipeline, and clear ownership boundaries if different teams own each. The cost is exactly what the monorepo buys you: keeping the JWT/env contract in sync now means coordinating changes across repositories, and there is no single command that brings up the whole stack for a new contributor.
+
+For a two-app project sharing one API contract and one local dev workflow, a monorepo is the right trade-off. DevBlog uses one.
+
+## Set it up
+
+Create the top-level folders and initialize git:
+
+```bash
+mkdir -p devblog/apps devblog/infra
+cd devblog
+git init
+```
+
+Create `.gitignore` at the repo root:
+
+```txt
+node_modules/
+dist/
+build/
+.next/
+out/
+coverage/
+*.log
+.DS_Store
+.env
+.env.local
+```
+
+`.env.example` is intentionally **not** listed here — it has no secrets, and it must stay tracked so every contributor knows which variables to set.
+
+Create `.env.example` at the repo root with every variable the stack needs:
+
+```txt
+MONGODB_URI=mongodb://devblog:devblog@localhost:27017/devblog?authSource=admin
+JWT_SECRET=change-me-in-prod
+API_PORT=4000
+WEB_ORIGIN=http://localhost:3000
+NEXT_PUBLIC_API_URL=http://localhost:4000/graphql
+```
+
+What each variable is for:
+
+- **`MONGODB_URI`** — the connection string Mongoose uses to reach MongoDB. The `devblog:devblog` credentials and `authSource=admin` match the root user you'll create for the Mongo container in [Compose skeleton](/devblog/en/setup/compose-skeleton/).
+- **`JWT_SECRET`** — the signing secret Passport-JWT uses to sign and verify author auth tokens. `change-me-in-prod` is a placeholder; a real deployment must override it with a long random value.
+- **`API_PORT`** — the port the NestJS API listens on. Read via `@nestjs/config` in `main.ts`, covered in [Backend init](/devblog/en/setup/backend-init/).
+- **`WEB_ORIGIN`** — the origin the API allows to call it (the Next.js app), used once CORS is configured in a later module.
+- **`NEXT_PUBLIC_API_URL`** — the GraphQL endpoint the Next.js app calls. The `NEXT_PUBLIC_` prefix is a Next.js convention that makes a variable readable from client-side code, not just the server.
+
+Finally, copy the template to a real, gitignored `.env` — this is the file your local processes actually read:
+
+```bash
+cp .env.example .env
+```
+
+## Verify
+
+```bash
+ls -la devblog
+# .env  .env.example  .gitignore  apps  infra  .git
+
+cat devblog/.env.example
+# (prints the five variables above)
+
+cd devblog && git status
+# .env is not listed (ignored); .env.example, .gitignore are untracked and ready to commit
+```
+
+If `.env` does **not** show up in `git status` but `.env.example` does, your `.gitignore` is working correctly.
+
+## Recap
+
+`devblog/` is a monorepo with `apps/api`, `apps/web`, and `infra/` as siblings, plus a root `.gitignore` and `.env.example`. The monorepo trades independent per-app deployment for a single source of truth on the JWT/Mongo/API-URL contract both apps share — the right call for two apps built together. `.env.example` documents every variable; the real `.env` holds local secrets and is never committed.
+
+Next: [Backend init →](/devblog/en/setup/backend-init/)

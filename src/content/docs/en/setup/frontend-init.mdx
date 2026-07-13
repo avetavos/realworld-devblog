@@ -1,0 +1,84 @@
+---
+title: Frontend Init
+description: "Scaffold the Next.js App Router project with create-next-app, install the GraphQL client and Markdown renderer, and point it at the API via NEXT_PUBLIC_API_URL."
+sidebar:
+  order: 3
+---
+
+## What we're building
+
+A Next.js application at `apps/web`, using the **App Router** with a top-level `app/` directory (no `src/`), pointed at the NestJS API through `NEXT_PUBLIC_API_URL`.
+
+## Why
+
+[Architecture](/devblog/en/introduction/architecture/) already committed to the App Router: Server Components fetch from the GraphQL API on the server for the public, cacheable read path, and Client Components hold the admin session for the JWT-authed write path. `create-next-app` scaffolds that structure directly instead of you assembling it by hand.
+
+## Pros & cons
+
+**App Router vs. Pages Router.** The App Router gives you React Server Components — a component that runs on the server, fetches data directly, and never ships its code to the browser — plus nested layouts and per-segment revalidation, which is exactly the ISR model the architecture lesson describes. The older Pages Router is simpler and has no server/client component split to reason about, but it also has no Server Components, so every data fetch either happens in `getServerSideProps`/`getStaticProps` or on the client. For a course built around SSR/ISR, App Router is the only real option.
+
+**`src/` vs. no `src/`.** A `src/` directory keeps application code separate from root-level config files (`next.config.ts`, `package.json`) — useful in larger projects with many top-level files. `apps/web` is already namespaced inside the `devblog/` monorepo, so that separation buys less here. This course keeps `app/` at the top level of `apps/web`, consistently, in every lesson that touches the front end.
+
+## Set it up
+
+Scaffold the app into `apps/web`, non-interactively:
+
+```bash
+cd devblog
+npx create-next-app@latest apps/web --typescript --app --no-src-dir --no-tailwind --eslint --import-alias "@/*" --use-npm
+cd apps/web
+```
+
+Install the two dependencies this course needs beyond what `create-next-app` already includes:
+
+```bash
+# graphql-request: a minimal client for calling the NestJS GraphQL API
+# react-markdown + remark-gfm: render a post's Markdown body, including GFM tables/strikethrough
+npm install graphql-request react-markdown remark-gfm
+```
+
+Create `apps/web/.env.local` so the app knows where the API lives:
+
+```txt
+NEXT_PUBLIC_API_URL=http://localhost:4000/graphql
+```
+
+This mirrors the root `.env.example` value from [Repo layout](/devblog/en/setup/repo-layout/). `.env.local` is a Next.js convention — it's gitignored by the scaffold's own `.gitignore` and always wins over other env files in local development.
+
+Start the dev server:
+
+```bash
+npm run dev
+```
+
+## Verify
+
+```txt
+Open http://localhost:3000
+# The default Next.js starter page loads, with a live-reloading dev server in the terminal
+```
+
+The resulting `app/` layout, fresh from the scaffold:
+
+```txt
+apps/web/
+├── app/
+│   ├── favicon.ico
+│   ├── globals.css
+│   ├── layout.tsx        # root layout — wraps every page, holds <html>/<body>
+│   └── page.tsx           # the "/" route
+├── public/
+├── .env.local
+├── next.config.ts
+├── package.json
+├── tsconfig.json
+└── eslint.config.mjs
+```
+
+(The exact file set can vary slightly with the Next.js version you install — the `app/` folder holding `layout.tsx` and `page.tsx` is the part that matters.)
+
+## Recap
+
+`apps/web` is a Next.js App Router project, scaffolded with `create-next-app --app --no-src-dir`, with `graphql-request` and `react-markdown`/`remark-gfm` installed for calling the API and rendering post bodies. `NEXT_PUBLIC_API_URL` in `.env.local` points it at `http://localhost:4000/graphql`, matching the API's port from [Backend init](/devblog/en/setup/backend-init/). `npm run dev` confirms it boots on port 3000.
+
+Next: [Compose skeleton →](/devblog/en/setup/compose-skeleton/)

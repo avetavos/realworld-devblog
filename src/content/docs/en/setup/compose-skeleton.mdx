@@ -1,0 +1,80 @@
+---
+title: Compose Skeleton
+description: "A partial docker-compose.yml that runs only MongoDB, with a named volume and a mongosh healthcheck — the API and web app join it in a later module."
+sidebar:
+  order: 4
+---
+
+## What we're building
+
+`infra/docker-compose.yml`, running a single service for now: `mongo`, with the root credentials both `MONGODB_URI` and later Mongoose connections expect, a named volume so data survives container restarts, and a healthcheck.
+
+## Why
+
+The API and web app aren't wired into Compose yet — they still run locally via `npm run start:dev` and `npm run dev`, against whichever MongoDB they can reach. Standing up Mongo alone first means you can verify the database in isolation, with `docker compose ps` and `mongosh`, before any application code depends on it. `apps/api` and `apps/web` join this file in Module 12.
+
+## Pros & cons
+
+**A partial compose file now vs. the full stack from day one.** Adding `api` and `web` services immediately would mean every code change requires a rebuild-and-restart loop through Docker, which is slower than `npm run start:dev`'s hot reload — and there's nothing to containerize yet at this point in the course anyway. Starting with just `mongo` gets you a stable, disposable database with zero cost to local iteration speed on the app code.
+
+**A named volume vs. a bind mount for Mongo's data.** A named volume (`mongodata`) is managed entirely by Docker — it survives `docker compose down` (without `-v`), doesn't scatter database files into your working tree, and avoids the file-permission and case-sensitivity quirks bind mounts can hit on macOS. A bind mount (`./data:/data/db`) gives you direct host filesystem access to the raw files, which is occasionally useful for manual inspection, but couples the container to a host path. This lesson uses a named volume.
+
+## Set it up
+
+Create `infra/docker-compose.yml`:
+
+```yaml
+services:
+  mongo:
+    image: mongo:7
+    environment:
+      MONGO_INITDB_ROOT_USERNAME: devblog
+      MONGO_INITDB_ROOT_PASSWORD: devblog
+    ports:
+      - "27017:27017"
+    volumes:
+      - mongodata:/data/db
+    healthcheck:
+      test: ["CMD", "mongosh", "--eval", "db.adminCommand('ping')"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+
+volumes:
+  mongodata: {}
+```
+
+`MONGO_INITDB_ROOT_USERNAME`/`MONGO_INITDB_ROOT_PASSWORD` are the official Mongo image's bootstrap variables: on the **first** start with an empty data directory, the entrypoint script creates a root user with these credentials in the special `admin` database. That's why `MONGODB_URI` in `.env.example` ends in `?authSource=admin` — it tells the Mongoose driver to authenticate against the `admin` database, where this root user actually lives, not against the `devblog` database in the path segment before it. Omitting `authSource=admin` would make every connection attempt fail with an authentication error, even with the right username and password.
+
+Bring the database up:
+
+```bash
+cd devblog/infra
+docker compose up -d mongo
+```
+
+## Verify
+
+```bash
+docker compose ps
+# NAME            IMAGE      STATUS
+# infra-mongo-1   mongo:7    Up (healthy)
+```
+
+Give it a few seconds for `start_period` to elapse if it still shows `(health: starting)`. Then confirm you can authenticate with the root user:
+
+```bash
+docker compose exec mongo mongosh -u devblog -p devblog --eval "db.adminCommand('ping')"
+# { ok: 1 }
+```
+
+`{ ok: 1 }` confirms the container is up, the root user was created with the credentials from `.env.example`, and the server responds to commands — the same handshake `MONGODB_URI` will perform once `apps/api` connects with Mongoose in a later module.
+
+## Recap
+
+`infra/docker-compose.yml` runs `mongo:7` alone, seeded with the `devblog`/`devblog` root user via `MONGO_INITDB_ROOT_USERNAME`/`MONGO_INITDB_ROOT_PASSWORD`, storing its data in the named volume `mongodata`, and reporting health through a `mongosh --eval` check. `docker compose ps` and an authenticated `mongosh --eval` ping both confirm it's ready. The API and web app connect to this same instance locally for the rest of the course, and join this Compose file themselves in Module 12.
+
+With the monorepo scaffolded, the API booting on 4000, the web app booting on 3000, and MongoDB running and reachable, Module 1 is complete — you have a working local toolchain for everything that follows.
+
+Next: [Data Modeling →](/devblog/en/data-modeling/)
