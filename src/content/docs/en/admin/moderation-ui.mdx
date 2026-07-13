@@ -1,0 +1,285 @@
+---
+title: Moderation UI
+description: "Build the admin comment moderation queue — aggregating comments(postId, status: PENDING) across every published post — with Approve/Reject actions calling moderateComment and refreshing the list after each one."
+sidebar:
+  order: 3
+---
+
+## What we're building
+
+`apps/web/app/admin/comments/page.tsx` — the last page this module adds. It lists every comment still `PENDING` across every published post, with an **Approve** and a **Reject** button per comment that call `moderateComment`, and reloads the whole pending queue after each one succeeds.
+
+## Why
+
+**There is no "every pending comment across the whole blog" query — `comments` always takes a `postId`.** `CommentsResolver.comments(postId: ID!, status?, currentUser?)` from [The comment model](/devblog/en/comments/comment-model/) requires `postId`; there's no root-level "all comments" or "all pending comments" operation anywhere in this schema. Building this page's queue means fetching the *set of posts* that could possibly have pending comments first, then asking `comments(postId, status: PENDING)` once per post and flattening the results — a fan-out this page owns, not something the API does for it.
+
+That candidate set only needs to be published posts, not every post an admin can see. `CommentsService.add` (from [The comment model](/devblog/en/comments/comment-model/)) refuses to attach a comment to anything that isn't currently `published`, and [Draft → published](/devblog/en/content-workflow/draft-publish/)'s state machine has exactly one transition — `draft → published` — with no way back. Put those two facts together: a comment can only ever exist on a post that is published *right now*, since a post that was published when the comment was added can never revert to `draft` afterward. Fetching `posts(status: PUBLISHED, pageSize: 100)` is therefore a complete list of every post that could have a pending comment, not an approximation — this page doesn't need `fetchAllPostsForAdmin` from [Post editor](/devblog/en/admin/post-editor/) at all, since drafts are provably never candidates.
+
+**The per-post fan-out is a deliberate, named N+1 — the second one this course accepts on purpose.** One query for the post list, then one `comments(postId, status: PENDING)` call per post returned, all fired in parallel with `Promise.all`, is exactly the shape [Posts resolver](/devblog/en/graphql-api/posts-resolver/) already named for `PostsResolver.author`: a list, then one extra round trip per item. That lesson accepted it because DataLoader-style batching wasn't worth adding for this course's scale; the same reasoning applies here, on the client instead of the server — an admin manually refreshing a moderation queue for a handful of posts never notices a few parallel requests, and building a batching layer for it would be solving a problem this course's real traffic never has.
+
+**`authorEmail` and `postId`/`postTitle` don't live on the shared `Comment` type — this page extends it locally.** [GraphQL client & auth](/devblog/en/frontend-foundations/graphql-client/)'s shared `Comment` interface only has `id`, `authorName`, `body`, and `createdAt` — deliberately narrow, since almost every other caller (the public `comments` query in [Post page](/devblog/en/public-blog/post-page/)) never needs an author's email or which post a comment belongs to. This page needs both — an admin moderating a queue has to know which post a comment is even about, and `authorEmail` is useful context for judging whether something is spam. Rather than widening the shared type for one caller, this page declares `type PendingComment = Comment & { authorEmail: string; postId: string; postTitle: string }` and asks its own query for the extra field the API actually has (`authorEmail`), then attaches `postId`/`postTitle` itself from the post each comment's fan-out request came from — they were never going to come back from `comments` itself, since a comment's `postId` field resolves via `@ResolveField()` on `Comment` and this page already knows it without asking. The exact same "extend locally, don't widen the shared type" move [Post page](/devblog/en/public-blog/post-page/) made with `PostWithComments`.
+
+**Reloading the whole queue after every action, rather than editing local state in place.** `handleModerate` calls `moderateComment`, then calls `loadPending()` again from scratch instead of just splicing the acted-on comment out of the `comments` array. That's a deliberate choice, not the lazy one: refetching guarantees this page's list matches what `comments(postId, status: PENDING)` would actually return right now, including a comment that arrived from a different browser tab or a different admin between page load and this action. Locally removing just one array entry is cheaper — no round trip — but silently assumes nothing else about the queue changed in the meantime, an assumption a single-admin course project can get away with but a real moderation queue with more than one moderator can't.
+
+## Pros & cons
+
+**Refetching the whole pending queue after every action (what we're using) vs. locally removing just the moderated comment from state.** Local removal is one array `.filter()`, no network round trip, and feels instant. It's also silently wrong the moment it isn't the only source of truth for what's actually pending: a comment approved by a different admin, or a brand-new comment submitted by a visitor, in the gap between this page's last load and the next render would never appear, because nothing ever told this component to look again. `loadPending()` costs exactly the network round trips it always costs — no more, no less — every single time, in exchange for the queue always reflecting the server's current state at the moment each action completes. For a moderation queue specifically, where staying in sync with what's genuinely still pending matters more than saving one refetch, that trade is worth making explicitly rather than defaulting to the cheaper-looking option.
+
+## Set it up
+
+Update `apps/web/app/admin/admin.module.css`, adding the comment list styles:
+
+```css
+.nav {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  border-bottom: 1px solid var(--color-border);
+  padding: var(--space-3) var(--space-6);
+}
+
+.navLinks {
+  display: flex;
+  gap: var(--space-4);
+}
+
+.logoutButton {
+  background: none;
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-md);
+  padding: var(--space-1) var(--space-3);
+  cursor: pointer;
+  font: inherit;
+}
+
+.checking {
+  padding: var(--space-6);
+  color: var(--color-muted);
+}
+
+.error {
+  color: var(--color-danger);
+  font-size: var(--text-sm);
+}
+
+.table {
+  width: 100%;
+  border-collapse: collapse;
+}
+
+.table th,
+.table td {
+  text-align: left;
+  padding: var(--space-2) var(--space-3);
+  border-bottom: 1px solid var(--color-border);
+}
+
+.actions {
+  display: flex;
+  gap: var(--space-3);
+}
+
+.commentList {
+  list-style: none;
+  padding: 0;
+}
+
+.commentCard {
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-md);
+  padding: var(--space-3);
+  margin-bottom: var(--space-3);
+}
+
+.commentMeta {
+  color: var(--color-muted);
+  font-size: var(--text-sm);
+  margin: 0 0 var(--space-2);
+}
+```
+
+`.actions` is reused as-is from [Post editor](/devblog/en/admin/post-editor/) — the same flex row of buttons with a `--space-3` gap fits an Approve/Reject pair exactly as well as it fit Edit/Publish/Delete.
+
+Create `apps/web/app/admin/comments/page.tsx`:
+
+```tsx
+'use client';
+
+import { useEffect, useState } from 'react';
+import { getToken } from '@/lib/auth';
+import { gqlFetch } from '@/lib/graphql';
+import type { Comment } from '@/lib/graphql';
+import styles from '../admin.module.css';
+
+type PendingComment = Comment & {
+  authorEmail: string;
+  postId: string;
+  postTitle: string;
+};
+
+const POSTS_FOR_MODERATION_QUERY = `
+  query PostsForModeration($pageSize: Int) {
+    posts(status: PUBLISHED, pageSize: $pageSize) {
+      items {
+        id
+        title
+      }
+    }
+  }
+`;
+
+const PENDING_COMMENTS_QUERY = `
+  query PendingComments($postId: ID!) {
+    comments(postId: $postId, status: PENDING) {
+      id
+      authorName
+      authorEmail
+      body
+      createdAt
+    }
+  }
+`;
+
+const MODERATE_COMMENT_MUTATION = `
+  mutation ModerateComment($id: ID!, $status: CommentStatus!) {
+    moderateComment(id: $id, status: $status) {
+      id
+      status
+    }
+  }
+`;
+
+export default function AdminCommentsPage() {
+  const [comments, setComments] = useState<PendingComment[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
+  const [actioningId, setActioningId] = useState<string | null>(null);
+
+  async function loadPending() {
+    const token = getToken();
+    if (!token) {
+      return;
+    }
+    setLoading(true);
+    setError(null);
+    try {
+      const { posts } = await gqlFetch<{ posts: { items: { id: string; title: string }[] } }>(
+        POSTS_FOR_MODERATION_QUERY,
+        { pageSize: 100 },
+        { token },
+      );
+
+      const perPost = await Promise.all(
+        posts.items.map(async (post) => {
+          const { comments: pending } = await gqlFetch<{
+            comments: (Comment & { authorEmail: string })[];
+          }>(PENDING_COMMENTS_QUERY, { postId: post.id }, { token });
+          return pending.map((comment) => ({
+            ...comment,
+            postId: post.id,
+            postTitle: post.title,
+          }));
+        }),
+      );
+
+      setComments(perPost.flat());
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Failed to load pending comments.');
+    } finally {
+      setLoading(false);
+    }
+  }
+
+  useEffect(() => {
+    loadPending();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  async function handleModerate(id: string, status: 'APPROVED' | 'REJECTED') {
+    const token = getToken();
+    if (!token) {
+      return;
+    }
+    setActioningId(id);
+    setError(null);
+    try {
+      await gqlFetch(MODERATE_COMMENT_MUTATION, { id, status }, { token });
+      await loadPending();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Failed to moderate comment.');
+    } finally {
+      setActioningId(null);
+    }
+  }
+
+  if (loading) {
+    return <p>Loading pending comments…</p>;
+  }
+
+  return (
+    <div>
+      <h1>Pending comments</h1>
+      {error && (
+        <p className={styles.error} role="alert">
+          {error}
+        </p>
+      )}
+      {comments.length === 0 ? (
+        <p>No comments awaiting moderation.</p>
+      ) : (
+        <ul className={styles.commentList}>
+          {comments.map((comment) => (
+            <li key={comment.id} className={styles.commentCard}>
+              <p className={styles.commentMeta}>
+                On <strong>{comment.postTitle}</strong> — {comment.authorName} (
+                {comment.authorEmail})
+              </p>
+              <p>{comment.body}</p>
+              <div className={styles.actions}>
+                <button
+                  onClick={() => handleModerate(comment.id, 'APPROVED')}
+                  disabled={actioningId === comment.id}
+                >
+                  Approve
+                </button>
+                <button
+                  onClick={() => handleModerate(comment.id, 'REJECTED')}
+                  disabled={actioningId === comment.id}
+                >
+                  Reject
+                </button>
+              </div>
+            </li>
+          ))}
+        </ul>
+      )}
+    </div>
+  );
+}
+```
+
+- **`POSTS_FOR_MODERATION_QUERY` hardcodes `status: PUBLISHED`** directly in the query document, rather than taking it as a `$status` variable — unlike `fetchAllPostsForAdmin` in [Post editor](/devblog/en/admin/post-editor/), this page never asks for anything but published posts, so there's no variable worth adding for a value that never changes.
+- **`posts.items.map(async (post) => ...)` inside `Promise.all`** fires every post's `comments(postId, status: PENDING)` request at the same time rather than one after another in sequence — the same fire-all-in-parallel shape `fetchAllPostsForAdmin` already used for its two status calls, just fanned out across however many published posts exist instead of a fixed two.
+- **`handleModerate`'s `status` parameter is typed as the literal union `'APPROVED' | 'REJECTED'`**, not a bare `string` — the two buttons are the only two ways this function is ever called, and the literal type makes a typo (`'Approve'`, `'approved'`) a compile error instead of a silent 400 from the API's `CommentStatus` enum validation.
+- **No generic passed to `gqlFetch` in `handleModerate`** — its result is never used, only awaited for its success/failure; `loadPending()` immediately after is what actually refreshes what's on screen.
+
+## Verify
+
+```bash
+cd apps/web
+npm run dev
+```
+
+Using the pending comment created back in [The comment model](/devblog/en/comments/comment-model/)'s Verify section (or a fresh one submitted through a published post's `CommentForm` at `/posts/<slug>`), log in to `/admin` as an `admin`-role account and open `/admin/comments`. The comment should appear, showing the correct post title, author name, and email.
+
+Click **Approve**. The comment should disappear from this queue — `loadPending()` re-ran and it's no longer `PENDING` — and running the public `comments` query for that post (or reloading its page at `/posts/<slug>`) should now show it, exactly matching [Moderation](/devblog/en/comments/moderation/)'s own Verify section.
+
+Submit a brand-new comment on a published post (through the public `CommentForm`), then reload `/admin/comments` without touching anything else — the new comment should appear in the queue, proving this page reflects the API's current pending set on every load rather than a stale snapshot from when the module was first written. Click **Reject** on it, and confirm the public `comments` query still never returns it — `REJECTED` is exactly as invisible to the public view as `PENDING` was.
+
+Finally, confirm the server, not this page, is what actually enforces who can moderate. Log in as an `author`-role account instead of `admin` and try clicking **Approve** on any pending comment — it should fail, with the API's rejection surfaced through this page's own error banner, the same `moderateComment`-restricted-to-`admin` behavior [Moderation](/devblog/en/comments/moderation/)'s own Verify section already demonstrated directly against the Apollo Sandbox.
+
+## Recap
+
+`/admin/comments` aggregates a moderation queue this API has no single query for: fetch every published post (the only posts that can ever have comments, since there's no unpublish path), fan out one `comments(postId, status: PENDING)` call per post in parallel, and flatten the results into a locally-typed `PendingComment[]` that extends the shared `Comment` type with the `authorEmail`/`postId`/`postTitle` fields this page needs but no other caller does. **Approve** and **Reject** both call the same `moderateComment` mutation with a different `status`, and both trigger a full `loadPending()` refetch afterward rather than a cheaper local splice — a deliberate choice to keep the visible queue matching the server's real pending set, not just what this page happened to load once. That closes out Module 10: authentication gating the whole `/admin` surface, a reusable post editor with a live preview, and a moderation queue — with every actual security decision, start to finish, still living entirely on the API this frontend only ever asks nicely.
+
+Next: [Testing →](/devblog/en/testing/)

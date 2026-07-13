@@ -1,0 +1,618 @@
+---
+title: Post editor
+description: "Build a reusable PostEditor Client Component with a live react-markdown preview, plus the admin posts list and its create/edit pages, wired to createPost, updatePost, publishPost, and deletePost."
+sidebar:
+  order: 2
+---
+
+## What we're building
+
+`apps/web/components/PostEditor.tsx` — one reusable Client Component form, parameterized by a `mode: 'create' | 'edit'` prop, with title/excerpt/cover-image/tags fields and a two-pane Markdown editor: a `<textarea>` for `body` on the left, a live `react-markdown` preview on the right. `apps/web/app/admin/posts/new/page.tsx` renders it in create mode; `apps/web/app/admin/posts/[id]/edit/page.tsx` loads an existing post and renders it in edit mode. `apps/web/app/admin/posts/page.tsx` lists every post an admin can see — drafts included — with Publish, Edit, and Delete actions. A small new helper, `apps/web/lib/admin-posts.ts`, backs both the list and the edit page.
+
+## Why
+
+**One editor, two modes, instead of two forms.** `PostEditor`'s fields, validation, and preview pane are identical whether a post already exists or not — only the submit target (`createPost` vs. `updatePost`) and the initial field values differ. Parameterizing by `mode` and an optional `post` prop keeps one form to maintain instead of two that would drift apart the moment either one changed. It's the same shape [Slugs & validation](/devblog/en/content-workflow/slugs-validation/) already used for `SlugService.generateUnique` — one shared implementation, a small parameter deciding the one place behavior actually needs to differ.
+
+**No admin `posts(id)` query exists — so the list and the edit page share one fetch.** The only single-post query in this API is `post(slug: String!)`, and it takes a slug, not a database id; `posts` takes `status`/`tag`/`page`/`pageSize`, never an `id`. There is genuinely no way to ask this API for "the one post with this `_id`" in a single round trip. `apps/web/lib/admin-posts.ts`'s `fetchAllPostsForAdmin` works around that by calling `posts(status: PUBLISHED, pageSize: 100)` and `posts(status: DRAFT, pageSize: 100)` in parallel and concatenating the results — the same two calls the list page needs anyway, since [Draft → published](/devblog/en/content-workflow/draft-publish/) made omitting `status` default to `PUBLISHED` only, with no single argument left that means "every status." The edit page reuses that exact function and finds one post by `id` in the result client-side. That's a real, named cost — fetching up to 200 posts to display or edit one — acceptable at this course's post count, and a genuine scaling limit: a real deployment with many more posts would add a proper admin-only `post(id: ID!)` query to the API instead. This lesson doesn't touch the backend at all, so the frontend works around the gap rather than closing it.
+
+**`post.publishedAt`, not `post.status`, decides "is this published."** [GraphQL client & auth](/devblog/en/frontend-foundations/graphql-client/)'s shared `Post` type declares `status: 'draft' | 'published'` — lowercase, matching how a Mongoose document stores it. But `Post.status` on the wire is a code-first GraphQL enum, and Apollo serializes an enum by its **member name**, not its underlying string value — every Verify section since [Draft → published](/devblog/en/content-workflow/draft-publish/) has shown it as `"PUBLISHED"` or `"DRAFT"`, uppercase, never the lowercase literal the shared type claims. Writing `post.status === 'published'` anywhere in this frontend would silently and permanently evaluate to `false` against real API responses — a comparison that type-checks cleanly and never fires. This lesson avoids that trap entirely by branching on `post.publishedAt` instead: `publishPost` is the only mutation that ever sets it, there's no "unpublish" mutation to unset it again, so a truthy `publishedAt` is exactly as reliable a signal as a correctly-cased `status` comparison would have been — without depending on getting the casing right. `post.status` itself is still perfectly fine to *display* as plain text (the posts list renders it nowhere directly, but `PostEditor` never reads it at all) — the trap is only in comparing it to a literal.
+
+**`excerpt`/`coverImage` are sent as `undefined`, never as an empty string, when a field is left blank.** `CreatePostInput.coverImage` is `@IsOptional() @IsUrl()` from [Posts resolver](/devblog/en/graphql-api/posts-resolver/) — `@IsOptional()` only skips validation when a field is `undefined` (or absent), not when it's an empty string. Submitting `coverImage: ''` would still run `@IsUrl()` against that empty string and fail, turning "I left this field blank" into a confusing validation error for a field that's genuinely optional. `PostEditor`'s submit handler writes `coverImage: coverImage || undefined` (and the same for `excerpt`) specifically so a blank field never reaches the wire as `''` at all — `JSON.stringify` drops an `undefined`-valued key from the request body entirely, so the mutation genuinely omits the argument, letting `PostsService.deriveExcerpt` (from [Slugs & validation](/devblog/en/content-workflow/slugs-validation/)) generate a real excerpt from `body` exactly as it would for a caller that left `excerpt` out of the mutation altogether. `tags` doesn't get the same treatment — it's always sent, even as `[]` — because clearing every tag and saving is a legitimate, intentional action; `PostsService.update`'s `patch` fully replaces whatever fields it receives rather than merging arrays, so an explicit empty array correctly clears a post's tags.
+
+**Redirecting straight to the edit page after `createPost`.** Once a new post is created, there's no reason to send the admin back to the list and make them find and click into it again — `createPost`'s response includes the new post's `id`, and `PostEditor` uses it to `router.push('/admin/posts/${id}/edit')` immediately, landing the admin on the exact same editor, now in edit mode, so publishing or refining the post they just wrote is the very next click.
+
+## Pros & cons
+
+**Fetching whole post pages and filtering client-side by id (what we're using) vs. adding a dedicated `post(id: ID!)` admin query to the API.** The API-side fix is the more scalable one — a single-document lookup by primary key, one round trip, no upper bound on how many posts exist. It also needs a new resolver method, a decision about whether it should be guarded the way `posts(status: DRAFT)` is (an author editing only their own drafts vs. an admin editing anyone's), and a genuine scope question: Module 10's task is the frontend, and this course draws its line there rather than reopening `apps/api` this late. Reusing `fetchAllPostsForAdmin` costs one extra network round trip on the edit page (fetching every post to find one) and a hard `pageSize: 100` ceiling inherited from the same trade-off [Post page](/devblog/en/public-blog/post-page/)'s `generateStaticParams` already named — invisible at this course's scale, a real constraint the moment a deployment's post count meaningfully exceeds it.
+
+## Set it up
+
+Create `apps/web/lib/admin-posts.ts`:
+
+```ts
+import { gqlFetch } from './graphql';
+import type { Post, PostPage } from './graphql';
+
+const ADMIN_POSTS_QUERY = `
+  query AdminPosts($status: PostStatus, $pageSize: Int) {
+    posts(status: $status, pageSize: $pageSize) {
+      items {
+        id
+        title
+        slug
+        body
+        excerpt
+        coverImage
+        status
+        tags
+        publishedAt
+        author {
+          displayName
+        }
+      }
+    }
+  }
+`;
+
+export async function fetchAllPostsForAdmin(token: string): Promise<Post[]> {
+  const [published, drafts] = await Promise.all([
+    gqlFetch<{ posts: PostPage }>(
+      ADMIN_POSTS_QUERY,
+      { status: 'PUBLISHED', pageSize: 100 },
+      { token },
+    ),
+    gqlFetch<{ posts: PostPage }>(
+      ADMIN_POSTS_QUERY,
+      { status: 'DRAFT', pageSize: 100 },
+      { token },
+    ),
+  ]);
+  return [...published.posts.items, ...drafts.posts.items];
+}
+```
+
+- **Two separate calls, run in parallel with `Promise.all`**, not one call with `status` left out — since [Draft → published](/devblog/en/content-workflow/draft-publish/), an omitted `status` silently defaults to `PUBLISHED` only, so the only way to get every status back is to ask for each one explicitly and combine the results here.
+
+Create `apps/web/components/PostEditor.module.css`:
+
+```css
+.form {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+  max-width: 960px;
+}
+
+.field {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-1);
+  font-size: var(--text-sm);
+}
+
+.field input {
+  padding: var(--space-2);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-md);
+  font: inherit;
+}
+
+.editorGrid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: var(--space-4);
+}
+
+.bodyInput {
+  padding: var(--space-2);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-md);
+  font: inherit;
+  font-family: monospace;
+  resize: vertical;
+}
+
+.preview {
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-md);
+  padding: var(--space-3);
+  overflow-y: auto;
+}
+
+.previewLabel {
+  margin: 0 0 var(--space-2);
+  color: var(--color-muted);
+  font-size: var(--text-sm);
+}
+
+.error {
+  color: var(--color-danger);
+  font-size: var(--text-sm);
+}
+
+.success {
+  color: var(--color-muted);
+  font-size: var(--text-sm);
+}
+```
+
+Create `apps/web/components/PostEditor.tsx`:
+
+```tsx
+'use client';
+
+import { useState } from 'react';
+import { useRouter } from 'next/navigation';
+import ReactMarkdown from 'react-markdown';
+import remarkGfm from 'remark-gfm';
+import { getToken } from '@/lib/auth';
+import { gqlFetch } from '@/lib/graphql';
+import type { Post } from '@/lib/graphql';
+import styles from './PostEditor.module.css';
+
+const CREATE_POST_MUTATION = `
+  mutation CreatePost($input: CreatePostInput!) {
+    createPost(input: $input) {
+      id
+    }
+  }
+`;
+
+const UPDATE_POST_MUTATION = `
+  mutation UpdatePost($id: ID!, $input: UpdatePostInput!) {
+    updatePost(id: $id, input: $input) {
+      id
+    }
+  }
+`;
+
+interface PostEditorProps {
+  mode: 'create' | 'edit';
+  post?: Post;
+}
+
+export function PostEditor({ mode, post }: PostEditorProps) {
+  const router = useRouter();
+  const [title, setTitle] = useState(post?.title ?? '');
+  const [excerpt, setExcerpt] = useState(post?.excerpt ?? '');
+  const [coverImage, setCoverImage] = useState(post?.coverImage ?? '');
+  const [tagsInput, setTagsInput] = useState(post?.tags.join(', ') ?? '');
+  const [body, setBody] = useState(post?.body ?? '');
+  const [isSaving, setIsSaving] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const [savedMessage, setSavedMessage] = useState<string | null>(null);
+
+  async function handleSubmit(event: React.FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    const token = getToken();
+    if (!token) {
+      setError('Your session is missing a token. Please log in again.');
+      return;
+    }
+
+    setIsSaving(true);
+    setError(null);
+    setSavedMessage(null);
+
+    const tags = tagsInput
+      .split(',')
+      .map((tag) => tag.trim())
+      .filter((tag) => tag.length > 0);
+
+    const input = {
+      title,
+      body,
+      excerpt: excerpt || undefined,
+      coverImage: coverImage || undefined,
+      tags,
+    };
+
+    try {
+      if (mode === 'create') {
+        const { createPost } = await gqlFetch<{ createPost: { id: string } }>(
+          CREATE_POST_MUTATION,
+          { input },
+          { token },
+        );
+        router.push(`/admin/posts/${createPost.id}/edit`);
+      } else if (post) {
+        await gqlFetch<{ updatePost: { id: string } }>(
+          UPDATE_POST_MUTATION,
+          { id: post.id, input },
+          { token },
+        );
+        setSavedMessage('Saved.');
+      }
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Failed to save the post.');
+    } finally {
+      setIsSaving(false);
+    }
+  }
+
+  return (
+    <form className={styles.form} onSubmit={handleSubmit}>
+      <label className={styles.field}>
+        Title
+        <input
+          value={title}
+          onChange={(event) => setTitle(event.target.value)}
+          required
+          minLength={3}
+        />
+      </label>
+      <label className={styles.field}>
+        Excerpt
+        <input value={excerpt} onChange={(event) => setExcerpt(event.target.value)} />
+      </label>
+      <label className={styles.field}>
+        Cover image URL
+        <input
+          type="url"
+          value={coverImage}
+          onChange={(event) => setCoverImage(event.target.value)}
+        />
+      </label>
+      <label className={styles.field}>
+        Tags (comma-separated)
+        <input value={tagsInput} onChange={(event) => setTagsInput(event.target.value)} />
+      </label>
+
+      <div className={styles.editorGrid}>
+        <label className={styles.field}>
+          Body (Markdown)
+          <textarea
+            className={styles.bodyInput}
+            value={body}
+            onChange={(event) => setBody(event.target.value)}
+            required
+            minLength={1}
+            rows={16}
+          />
+        </label>
+        <div className={styles.preview}>
+          <p className={styles.previewLabel}>Preview</p>
+          <ReactMarkdown remarkPlugins={[remarkGfm]}>
+            {body || '*Nothing to preview yet.*'}
+          </ReactMarkdown>
+        </div>
+      </div>
+
+      {error && (
+        <p className={styles.error} role="alert">
+          {error}
+        </p>
+      )}
+      {savedMessage && <p className={styles.success}>{savedMessage}</p>}
+
+      <button type="submit" disabled={isSaving}>
+        {isSaving ? 'Saving…' : mode === 'create' ? 'Create post' : 'Save changes'}
+      </button>
+    </form>
+  );
+}
+```
+
+- **`post?.tags.join(', ') ?? ''`** turns the shared `Post.tags: string[]` into one editable text field; the reverse split happens in `handleSubmit`, trimming and dropping empty entries so `"nestjs,  , graphql"` becomes `['nestjs', 'graphql']`, not `['nestjs', '', 'graphql']`.
+- **`else if (post)`** — `mode === 'edit'` without a `post` prop is a caller mistake this component can't recover from; it silently does nothing rather than crashing, since the edit page below never renders `PostEditor` until it has a real `post` in hand.
+- **`react-markdown`/`remark-gfm`** are the exact same packages [Post page](/devblog/en/public-blog/post-page/) already installed and uses for the public-facing render — this preview pane and that page render identically, so what an admin sees while writing is what a reader will see once it's published.
+
+Update `apps/web/app/admin/admin.module.css`, adding a table and an inline error style:
+
+```css
+.nav {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  border-bottom: 1px solid var(--color-border);
+  padding: var(--space-3) var(--space-6);
+}
+
+.navLinks {
+  display: flex;
+  gap: var(--space-4);
+}
+
+.logoutButton {
+  background: none;
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-md);
+  padding: var(--space-1) var(--space-3);
+  cursor: pointer;
+  font: inherit;
+}
+
+.checking {
+  padding: var(--space-6);
+  color: var(--color-muted);
+}
+
+.error {
+  color: var(--color-danger);
+  font-size: var(--text-sm);
+}
+
+.table {
+  width: 100%;
+  border-collapse: collapse;
+}
+
+.table th,
+.table td {
+  text-align: left;
+  padding: var(--space-2) var(--space-3);
+  border-bottom: 1px solid var(--color-border);
+}
+
+.actions {
+  display: flex;
+  gap: var(--space-3);
+}
+```
+
+Create `apps/web/app/admin/posts/page.tsx`:
+
+```tsx
+'use client';
+
+import { useEffect, useState } from 'react';
+import Link from 'next/link';
+import { getToken } from '@/lib/auth';
+import { gqlFetch } from '@/lib/graphql';
+import type { Post } from '@/lib/graphql';
+import { fetchAllPostsForAdmin } from '@/lib/admin-posts';
+import styles from '../admin.module.css';
+
+const PUBLISH_POST_MUTATION = `
+  mutation PublishPost($id: ID!) {
+    publishPost(id: $id) {
+      id
+      publishedAt
+    }
+  }
+`;
+
+const DELETE_POST_MUTATION = `
+  mutation DeletePost($id: ID!) {
+    deletePost(id: $id) {
+      id
+    }
+  }
+`;
+
+export default function AdminPostsPage() {
+  const [posts, setPosts] = useState<Post[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
+  const [actioningId, setActioningId] = useState<string | null>(null);
+
+  async function loadPosts() {
+    const token = getToken();
+    if (!token) {
+      return;
+    }
+    setLoading(true);
+    setError(null);
+    try {
+      const items = await fetchAllPostsForAdmin(token);
+      setPosts(items);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Failed to load posts.');
+    } finally {
+      setLoading(false);
+    }
+  }
+
+  useEffect(() => {
+    loadPosts();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  async function handlePublish(id: string) {
+    const token = getToken();
+    if (!token) {
+      return;
+    }
+    setActioningId(id);
+    setError(null);
+    try {
+      const { publishPost } = await gqlFetch<{ publishPost: { id: string; publishedAt: string } }>(
+        PUBLISH_POST_MUTATION,
+        { id },
+        { token },
+      );
+      setPosts((current) =>
+        current.map((post) =>
+          post.id === id ? { ...post, publishedAt: publishPost.publishedAt } : post,
+        ),
+      );
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Failed to publish post.');
+    } finally {
+      setActioningId(null);
+    }
+  }
+
+  async function handleDelete(id: string) {
+    if (!confirm('Delete this post? This cannot be undone.')) {
+      return;
+    }
+    const token = getToken();
+    if (!token) {
+      return;
+    }
+    setActioningId(id);
+    setError(null);
+    try {
+      await gqlFetch<{ deletePost: { id: string } }>(DELETE_POST_MUTATION, { id }, { token });
+      setPosts((current) => current.filter((post) => post.id !== id));
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Failed to delete post.');
+    } finally {
+      setActioningId(null);
+    }
+  }
+
+  if (loading) {
+    return <p>Loading posts…</p>;
+  }
+
+  return (
+    <div>
+      <h1>Posts</h1>
+      <p>
+        <Link href="/admin/posts/new">New post</Link>
+      </p>
+      {error && (
+        <p className={styles.error} role="alert">
+          {error}
+        </p>
+      )}
+      <table className={styles.table}>
+        <thead>
+          <tr>
+            <th>Title</th>
+            <th>Status</th>
+            <th>Author</th>
+            <th>Actions</th>
+          </tr>
+        </thead>
+        <tbody>
+          {posts.map((post) => (
+            <tr key={post.id}>
+              <td>{post.title}</td>
+              <td>{post.publishedAt ? 'Published' : 'Draft'}</td>
+              <td>{post.author.displayName}</td>
+              <td className={styles.actions}>
+                <Link href={`/admin/posts/${post.id}/edit`}>Edit</Link>
+                {!post.publishedAt && (
+                  <button onClick={() => handlePublish(post.id)} disabled={actioningId === post.id}>
+                    Publish
+                  </button>
+                )}
+                <button onClick={() => handleDelete(post.id)} disabled={actioningId === post.id}>
+                  Delete
+                </button>
+              </td>
+            </tr>
+          ))}
+        </tbody>
+      </table>
+    </div>
+  );
+}
+```
+
+- **`deletePost` requests `{ id }` back**, not a bare boolean — the mutation's real GraphQL return type is `Post`, from [Posts resolver](/devblog/en/graphql-api/posts-resolver/), so a selection set is required; querying it with no sub-selection at all is a GraphQL syntax error against this schema, whatever a shorthand description of the mutation might suggest.
+- **`{!post.publishedAt && <button>Publish</button>}`** — this is the one place a post's publish state actually gates the UI, and it reads `publishedAt`, never `status`, for the reason the Why section above spelled out.
+- **`confirm(...)` before delete** — a plain, synchronous browser confirmation is enough friction for a destructive, unrecoverable action in a course-scoped admin tool; a production app would likely replace it with a styled dialog, not because `confirm` is wrong, but because it can't be restyled at all.
+
+Create `apps/web/app/admin/posts/new/page.tsx`:
+
+```tsx
+import { PostEditor } from '@/components/PostEditor';
+
+export default function NewPostPage() {
+  return (
+    <div>
+      <h1>New post</h1>
+      <PostEditor mode="create" />
+    </div>
+  );
+}
+```
+
+Create `apps/web/app/admin/posts/[id]/edit/page.tsx`:
+
+```tsx
+'use client';
+
+import { useEffect, useState } from 'react';
+import { useParams } from 'next/navigation';
+import { getToken } from '@/lib/auth';
+import { fetchAllPostsForAdmin } from '@/lib/admin-posts';
+import type { Post } from '@/lib/graphql';
+import { PostEditor } from '@/components/PostEditor';
+
+export default function EditPostPage() {
+  const params = useParams<{ id: string }>();
+  const [post, setPost] = useState<Post | null>(null);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
+
+  useEffect(() => {
+    const token = getToken();
+    if (!token) {
+      return;
+    }
+
+    let cancelled = false;
+    fetchAllPostsForAdmin(token)
+      .then((posts) => {
+        if (cancelled) {
+          return;
+        }
+        const found = posts.find((item) => item.id === params.id) ?? null;
+        setPost(found);
+        if (!found) {
+          setError('Post not found.');
+        }
+      })
+      .catch((err) => {
+        if (!cancelled) {
+          setError(err instanceof Error ? err.message : 'Failed to load the post.');
+        }
+      })
+      .finally(() => {
+        if (!cancelled) {
+          setLoading(false);
+        }
+      });
+
+    return () => {
+      cancelled = true;
+    };
+  }, [params.id]);
+
+  if (loading) {
+    return <p>Loading post…</p>;
+  }
+
+  if (error || !post) {
+    return <p role="alert">{error ?? 'Post not found.'}</p>;
+  }
+
+  return (
+    <div>
+      <h1>Edit post</h1>
+      <PostEditor mode="edit" post={post} />
+    </div>
+  );
+}
+```
+
+- **`useParams<{ id: string }>()`** reads the `[id]` dynamic segment straight from the URL — this file lives at `app/admin/posts/[id]/edit/page.tsx`, so `params.id` is exactly the segment between `posts/` and `/edit`.
+- **`cancelled` flag inside the effect's cleanup** guards against a slow `fetchAllPostsForAdmin` resolving after the component has already unmounted (navigating away mid-fetch) — the same pattern this course's realtime helpers use elsewhere, applied here to a one-shot fetch instead of a subscription.
+
+## Verify
+
+```bash
+cd apps/web
+npm run dev
+```
+
+Log in at `/admin/login`, then open `/admin/posts/new`. Type a title (3+ characters) and some Markdown in the body — try `**bold**`, a `- list item`, and a heading — and confirm the preview pane on the right renders them as real formatting, not literal asterisks or dashes, live as you type. Submit the form.
+
+You should land on `/admin/posts/<new id>/edit`, the same editor now pre-filled with what you just wrote. Open `/admin/posts` in another tab (or navigate there) and confirm the new post appears with **Status: Draft**.
+
+Back on the list, click **Publish** for that post. Its status should flip to **Published** immediately, with no full reload — confirming `setPosts` correctly updated the one row from the mutation's response. Open the public site at `/posts/<its slug>` (from [Post page](/devblog/en/public-blog/post-page/)) and confirm it's now visible there too.
+
+Edit the same post: change its title, add a tag, and clear the excerpt field entirely, then save. Reload `/admin/posts/<id>/edit` and confirm the title and tag changes persisted, and that the excerpt field now shows a real auto-derived excerpt from the body — not blank — proving the `undefined`-not-empty-string handling worked and `PostsService.deriveExcerpt` ran.
+
+Finally, prove the server is the real enforcer, not this page. Log in as an `author`-role account (not `admin`) and click **Delete** on any post — it should fail, with the API's real rejection message shown inline via this page's own error banner, the same `deletePost`-restricted-to-`admin` behavior [Posts resolver](/devblog/en/graphql-api/posts-resolver/)'s own Verify section demonstrated against the Apollo Sandbox directly. Log in as an `admin` account and repeat it — the post should disappear from the list, confirming the same UI path succeeds once the server actually allows it.
+
+## Recap
+
+`PostEditor` is one reusable Client Component covering both create and edit, distinguishing the two only by a `mode` prop and an optional `post`, with a live `react-markdown` preview using the exact rendering path [Post page](/devblog/en/public-blog/post-page/) already built for readers. `fetchAllPostsForAdmin` works around this API's real gap — no `post(id)` query — by fetching every status in parallel and filtering client-side, a named, scoped trade-off rather than a backend change this module doesn't make. The admin posts list uses `post.publishedAt`, not `post.status`, to decide what's published, sidestepping a real wire-format mismatch between the shared `Post` type's lowercase claim and the uppercase GraphQL enum value every Verify section has actually shown. `deletePost`'s selection set (`{ id }`, not a bare call) matches its real `Post` return type, not a shorthand description of it — and attempting it as a non-admin fails exactly where [Posts resolver](/devblog/en/graphql-api/posts-resolver/) built that restriction, surfaced here as a plain, readable error instead of a silent no-op.
+
+Next: [Moderation UI →](/devblog/en/admin/moderation-ui/)

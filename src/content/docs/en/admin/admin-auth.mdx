@@ -1,0 +1,317 @@
+---
+title: Admin auth
+description: "Build the admin login form and a client-side layout guard for /admin/* routes, and understand exactly what a localStorage-based auth check can and can't protect."
+sidebar:
+  order: 1
+---
+
+## What we're building
+
+`apps/web/app/admin/login/page.tsx` — a Client Component form that calls `login`, stores the returned token with `setToken`, and redirects to `/admin`. `apps/web/app/admin/layout.tsx` — the layout every route under `/admin/*` renders inside, which reads the token with `getToken`, redirects to `/admin/login` when it's missing, and otherwise renders a nav (Dashboard, Posts, Comments) plus a logout button. Alongside those, `apps/web/app/admin/page.tsx` — a plain dashboard landing page — and `apps/web/app/admin/admin.module.css` for the shared admin chrome.
+
+## Why
+
+Every piece this lesson wires together already exists from [GraphQL client & auth](/devblog/en/frontend-foundations/graphql-client/): `login` is the same `AuthPayload`-returning mutation [Auth resolver & GraphQL setup](/devblog/en/auth/auth-resolver/) built, and `getToken`/`setToken`/`clearToken` are the three `localStorage` helpers that lesson wrapped around it. Nothing new gets added to the API or to `lib/auth.ts` here — this lesson is the first place either one gets a real UI in front of it.
+
+`AdminLoginPage` is a Client Component for the same reason `CommentForm` was in [Post page](/devblog/en/public-blog/post-page/): it needs `useState` for the form fields and submission status, and `useRouter` to redirect after a successful login — none of which a Server Component can have. On submit, it calls `gqlFetch(LOGIN_MUTATION, { input: { email, password } })` with no `token` option at all — `login` is one of the two mutations (alongside `register`) that anonymous callers are allowed to reach, the same open-write exception [Auth resolver & GraphQL setup](/devblog/en/auth/auth-resolver/) already carved out. On success, `setToken(login.token)` writes the JWT to `localStorage` and `router.push('/admin')` sends the browser to the dashboard.
+
+`AdminLayout` is where this lesson's real design work is. It wraps every route in `app/admin/`, which creates one immediate wrinkle: `/admin/login` itself is also a route under `app/admin/`, so the very layout meant to redirect unauthenticated visitors to the login page would also wrap the login page — and if it applied its "no token, redirect to `/admin/login`" rule unconditionally, visiting `/admin/login` would redirect to `/admin/login`, which redirects to `/admin/login` again, forever. `AdminLayout` breaks that loop with one check: `const isLoginRoute = pathname === '/admin/login'`, read through `usePathname()` from `next/navigation`. When `isLoginRoute` is true, the layout renders `children` (the login page) untouched, nav and all skipped, no redirect logic runs at all. Everywhere else under `/admin/*`, a `useEffect` running once at mount reads `getToken()`; a missing token calls `router.replace('/admin/login')`, and a present one flips a `checked` state flag that unlocks the real render — the nav, the logout button, and `children` (whichever admin page is actually being visited).
+
+That `useEffect` running once, not on every navigation, is deliberate: `layout.tsx` in the App Router persists across client-side navigation between sibling routes it wraps — moving from `/admin/posts` to `/admin/posts/new` re-renders `children` without unmounting and remounting `AdminLayout` itself. Checking `getToken()` once at the layout's first mount is enough to gate the whole `/admin` session; re-running it on every single route change would just repeat the same synchronous `localStorage.getItem` call for no benefit, since nothing about this check can catch a token going bad mid-session anyway (more on that below).
+
+An alternative worth naming and setting aside: Next.js route groups (`app/admin/(protected)/posts/...` alongside a separate `app/admin/login/...`, each with its own `layout.tsx`) would remove the need for the `isLoginRoute` special case entirely, since the guard layout would only ever wrap routes that actually need it. That's a real, cleaner structure for a larger app; for one exception in one file, the inline pathname check is a single `if`, not a folder reorganization, and this lesson takes the cheaper option rather than restructuring every later lesson's file paths around it.
+
+## Pros & cons
+
+**A client-side layout guard reading `localStorage` (what we're using) vs. Next.js Middleware reading an `httpOnly` cookie.** Middleware runs on the server (or the edge) before any HTML reaches the browser at all — it can issue a real HTTP redirect for an unauthenticated request, so a logged-out visitor never sees so much as a flash of admin markup, and the redirect still works with JavaScript disabled entirely. The catch is what middleware has access to: only what arrives on the request itself — headers and cookies — never `localStorage`, which is a browser API with no wire representation at all; nothing about a plain `GET /admin/posts` request carries it. [GraphQL client & auth](/devblog/en/frontend-foundations/graphql-client/) already chose `localStorage` for this token, specifically because DevBlog's frontend and API are two separately deployed applications with no shared-domain `Set-Cookie` path to lean on — and that same lesson named the real trade-off honestly: an `httpOnly` cookie would close the XSS-readability gap `localStorage` leaves open, at the cost of needing a same-domain (or carefully configured cross-domain) cookie path this course doesn't build. Middleware only becomes an option once that move happens; with the token in `localStorage`, there is nothing in an incoming request for middleware to check, which is exactly why this guard lives in a Client Component instead.
+
+That gap has two concrete costs, both worth being honest about rather than glossing over. First, a real, visible one: `getToken()` only runs in the browser, so `AdminLayout` cannot decide "show the dashboard" or "redirect to login" until its JavaScript has loaded and `useEffect` has run — every visitor to an admin route, authenticated or not, sees this file's own "Checking session…" fallback first, however briefly. The Verify section below proves this with a plain `curl`. Second, and more important: **even once this guard renders the dashboard, it is not a security boundary.** A visitor could disable JavaScript, edit `localStorage` by hand, or skip the browser and call the GraphQL API directly with any tool that speaks HTTP — none of them would ever run this file's `useEffect` at all. Nothing this lesson's UI decides is trusted by the API. `createPost`, `updatePost`, `publishPost`, `deletePost`, and `moderateComment` — every mutation the rest of this module wires up — are independently guarded server-side by `GqlAuthGuard`, with `RolesGuard` plus `@Roles('admin')` layered on for the admin-only ones, exactly as [Guards & roles](/devblog/en/auth/guards-roles/) built them. This layout's entire job is UX — don't show admin chrome to a logged-out visitor, send them somewhere useful instead — never enforcement. The real gate was already built, three modules ago, and lives entirely on the server.
+
+## Set it up
+
+Create `apps/web/app/admin/login/login.module.css`:
+
+```css
+.page {
+  max-width: 360px;
+  margin: var(--space-8) auto;
+}
+
+.form {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+}
+
+.field {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-1);
+  font-size: var(--text-sm);
+}
+
+.field input {
+  padding: var(--space-2);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-md);
+  font: inherit;
+}
+
+.error {
+  color: var(--color-danger);
+  font-size: var(--text-sm);
+}
+```
+
+`--color-danger` already exists in `globals.css` — [Post page](/devblog/en/public-blog/post-page/) added it for `CommentForm`'s own error text, and this form reuses it rather than defining a second red.
+
+Create `apps/web/app/admin/login/page.tsx`:
+
+```tsx
+'use client';
+
+import { useState } from 'react';
+import { useRouter } from 'next/navigation';
+import { gqlFetch } from '@/lib/graphql';
+import { setToken } from '@/lib/auth';
+import styles from './login.module.css';
+
+const LOGIN_MUTATION = `
+  mutation Login($input: LoginInput!) {
+    login(input: $input) {
+      token
+      user {
+        id
+        displayName
+        role
+      }
+    }
+  }
+`;
+
+interface LoginResult {
+  login: {
+    token: string;
+    user: { id: string; displayName: string; role: string };
+  };
+}
+
+export default function AdminLoginPage() {
+  const router = useRouter();
+  const [email, setEmail] = useState('');
+  const [password, setPassword] = useState('');
+  const [isSubmitting, setIsSubmitting] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  async function handleSubmit(event: React.FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    setError(null);
+    setIsSubmitting(true);
+
+    try {
+      const { login } = await gqlFetch<LoginResult>(LOGIN_MUTATION, {
+        input: { email, password },
+      });
+      setToken(login.token);
+      router.push('/admin');
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Invalid email or password.');
+    } finally {
+      setIsSubmitting(false);
+    }
+  }
+
+  return (
+    <div className={styles.page}>
+      <h1>Admin log in</h1>
+      <form className={styles.form} onSubmit={handleSubmit}>
+        <label className={styles.field}>
+          Email
+          <input
+            type="email"
+            value={email}
+            onChange={(event) => setEmail(event.target.value)}
+            required
+          />
+        </label>
+        <label className={styles.field}>
+          Password
+          <input
+            type="password"
+            value={password}
+            onChange={(event) => setPassword(event.target.value)}
+            required
+          />
+        </label>
+        {error && (
+          <p className={styles.error} role="alert">
+            {error}
+          </p>
+        )}
+        <button type="submit" disabled={isSubmitting}>
+          {isSubmitting ? 'Logging in…' : 'Log in'}
+        </button>
+      </form>
+    </div>
+  );
+}
+```
+
+- **No `token` passed to `gqlFetch`** — `login` doesn't need one, the same way `register` doesn't; both are open mutations by design.
+- **`err instanceof Error ? err.message : ...`** surfaces `gqlFetch`'s own thrown `Error` — from [GraphQL client & auth](/devblog/en/frontend-foundations/graphql-client/), a wrong password reaches `AuthResolver.login`'s generic `UnauthorizedException`, which `gqlFetch` turns into a real, readable message rather than a silent failure.
+
+Create `apps/web/app/admin/admin.module.css`:
+
+```css
+.nav {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  border-bottom: 1px solid var(--color-border);
+  padding: var(--space-3) var(--space-6);
+}
+
+.navLinks {
+  display: flex;
+  gap: var(--space-4);
+}
+
+.logoutButton {
+  background: none;
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-md);
+  padding: var(--space-1) var(--space-3);
+  cursor: pointer;
+  font: inherit;
+}
+
+.checking {
+  padding: var(--space-6);
+  color: var(--color-muted);
+}
+```
+
+[Post editor](/devblog/en/admin/post-editor/) and [Moderation UI](/devblog/en/admin/moderation-ui/) both extend this same file rather than starting a new one — the same "one shared file grows across lessons" shape `globals.css` already followed from [App Router & layout](/devblog/en/frontend-foundations/app-router-layout/) through [Styling](/devblog/en/frontend-foundations/styling/).
+
+Create `apps/web/app/admin/layout.tsx`:
+
+```tsx
+'use client';
+
+import { useEffect, useState } from 'react';
+import { usePathname, useRouter } from 'next/navigation';
+import Link from 'next/link';
+import { clearToken, getToken } from '@/lib/auth';
+import styles from './admin.module.css';
+
+export default function AdminLayout({ children }: { children: React.ReactNode }) {
+  const pathname = usePathname();
+  const router = useRouter();
+  const isLoginRoute = pathname === '/admin/login';
+  const [checked, setChecked] = useState(isLoginRoute);
+
+  useEffect(() => {
+    if (isLoginRoute) {
+      return;
+    }
+    if (!getToken()) {
+      router.replace('/admin/login');
+      return;
+    }
+    setChecked(true);
+    // Runs once, at mount: this layout persists across client-side
+    // navigation between /admin/* routes, so the check does not repeat
+    // on every route change. See "Why" above for the trade-off.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  function handleLogout() {
+    clearToken();
+    router.push('/admin/login');
+  }
+
+  if (isLoginRoute) {
+    return <>{children}</>;
+  }
+
+  if (!checked) {
+    return <p className={styles.checking}>Checking session…</p>;
+  }
+
+  return (
+    <div>
+      <nav className={styles.nav}>
+        <div className={styles.navLinks}>
+          <Link href="/admin">Dashboard</Link>
+          <Link href="/admin/posts">Posts</Link>
+          <Link href="/admin/comments">Comments</Link>
+        </div>
+        <button className={styles.logoutButton} onClick={handleLogout}>
+          Log out
+        </button>
+      </nav>
+      <main>{children}</main>
+    </div>
+  );
+}
+```
+
+- **`isLoginRoute` is computed fresh on every render**, not just inside the effect — after `handleLogout` calls `router.push('/admin/login')`, `pathname` changes, `isLoginRoute` becomes `true` on the very next render, and the component returns `children` immediately with no nav flash and no need to re-run the mount effect.
+- **`useState(isLoginRoute)` as `checked`'s initial value** means the login route never shows "Checking session…" at all — it has nothing to check.
+- **No `'use client'` needed in `children` itself** — whatever page renders inside this layout (a Server Component like `app/admin/page.tsx` below, or a Client Component like the login page above) is just a prop this Client Component happens to render; Server Components can be passed as `children` to a Client Component exactly the way `RootLayout` in [App Router & layout](/devblog/en/frontend-foundations/app-router-layout/) passes `children` through untouched.
+
+Create `apps/web/app/admin/page.tsx`:
+
+```tsx
+import Link from 'next/link';
+
+export default function AdminDashboardPage() {
+  return (
+    <div>
+      <h1>Admin dashboard</h1>
+      <p>Manage DevBlog&rsquo;s content from here.</p>
+      <ul>
+        <li>
+          <Link href="/admin/posts">Posts — write, edit, publish, delete</Link>
+        </li>
+        <li>
+          <Link href="/admin/comments">Comments — moderate the pending queue</Link>
+        </li>
+      </ul>
+    </div>
+  );
+}
+```
+
+This page is a plain Server Component, no `'use client'` — it takes no props, holds no state, and needs nothing the browser alone can give it. `AdminLayout` around it is the only Client Component boundary this route needs.
+
+## Verify
+
+```bash
+cd apps/web
+npm run dev
+```
+
+With no token in `localStorage` (open a private/incognito window, or clear it from DevTools), visit `http://localhost:3000/admin` — you should land on `http://localhost:3000/admin/login` instead, redirected by `AdminLayout`'s `useEffect`.
+
+Prove that redirect is entirely client-side, not something the server decided:
+
+```bash
+curl -s http://localhost:3000/admin | grep -o '<p[^>]*>Checking session…</p>'
+```
+
+```txt
+<p class="admin_checking__xxxxx">Checking session…</p>
+```
+
+That's the server's own render of `AdminLayout` — the same markup regardless of whether the real browser making this exact request has a valid token sitting in its `localStorage` or none at all, because the server has no way to know. The real decision — show the dashboard, or redirect to `/admin/login` — only happens after this HTML hydrates in a real browser and `useEffect` actually runs.
+
+Now log in for real. Using an account from an earlier module's Verify section (e.g. the `author@example.com` / `correct-horse` pair from [Auth resolver & GraphQL setup](/devblog/en/auth/auth-resolver/)), fill in the form at `/admin/login` and submit. You should land on `/admin` with the dashboard, nav, and logout button all visible. Open DevTools' Application tab and confirm `localStorage` now holds a `devblog_token` key with a real JWT value.
+
+Click **Log out** — you should return to `/admin/login`, and `devblog_token` should be gone from `localStorage`. Try navigating directly to `/admin/posts` afterward (a route [Post editor](/devblog/en/admin/post-editor/) builds next) — with no token, `AdminLayout` redirects you straight back to `/admin/login`, confirming the guard applies to every route under `/admin/*`, not just `/admin` itself.
+
+## Recap
+
+`AdminLoginPage` is a Client Component form calling the same `login` mutation and `setToken` helper [GraphQL client & auth](/devblog/en/frontend-foundations/graphql-client/) already built, with no token attached to the request — `login` is one of DevBlog's two intentionally open mutations. `AdminLayout` guards every route under `/admin/*` by reading `getToken()` once at mount, special-casing `/admin/login` itself to avoid an infinite redirect loop, and rendering a nav plus logout button once a token is present. The `curl` in this lesson's Verify section proves the point its Pros & cons made in words: this guard is UX, not security — the server renders the exact same "Checking session…" markup no matter who's asking, and every real enforcement decision happens where it always has, inside `GqlAuthGuard` and `RolesGuard` on the API.
+
+Next: [Post editor →](/devblog/en/admin/post-editor/)

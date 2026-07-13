@@ -1,0 +1,285 @@
+---
+title: หน้าตรวจสอบคอมเมนต์
+description: "สร้างคิว moderation คอมเมนต์ของ admin — รวบรวม comments(postId, status: PENDING) จากทุกโพสต์ที่ publish แล้ว — พร้อมปุ่ม Approve/Reject ที่เรียก moderateComment และโหลดรายการใหม่ทุกครั้งหลังทำรายการ"
+sidebar:
+  order: 3
+---
+
+## What we're building
+
+`apps/web/app/admin/comments/page.tsx` — หน้าสุดท้ายที่โมดูลนี้เพิ่มเข้ามา มันแสดงรายการทุกคอมเมนต์ที่ยังเป็น `PENDING` จากทุกโพสต์ที่ publish แล้ว พร้อมปุ่ม **Approve** และ **Reject** ต่อคอมเมนต์หนึ่งตัวที่เรียก `moderateComment` แล้วโหลดคิว pending ทั้งหมดใหม่หลังจากแต่ละครั้งสำเร็จ
+
+## Why
+
+**ไม่มี query แบบ "ทุกคอมเมนต์ pending ในบล็อกทั้งหมด" เลย — `comments` ต้องรับ `postId` เสมอ** `CommentsResolver.comments(postId: ID!, status?, currentUser?)` จาก [The comment model](/devblog/th/comments/comment-model/) ต้องการ `postId`; ไม่มี operation ระดับ root แบบ "คอมเมนต์ทั้งหมด" หรือ "คอมเมนต์ pending ทั้งหมด" อยู่ที่ไหนใน schema นี้เลย การสร้างคิวของหน้านี้หมายถึงการดึง *ชุดโพสต์* ที่เป็นไปได้ว่าจะมีคอมเมนต์ pending ก่อน แล้วถาม `comments(postId, status: PENDING)` ทีละโพสต์ แล้วเอาผลลัพธ์มาแบนรวมกัน — เป็น fan-out ที่หน้านี้เป็นเจ้าของเอง ไม่ใช่สิ่งที่ API ทำให้
+
+ชุด candidate นั้นต้องการแค่โพสต์ที่ publish แล้วเท่านั้น ไม่ใช่ทุกโพสต์ที่ admin มองเห็นได้ `CommentsService.add` (จาก [The comment model](/devblog/th/comments/comment-model/)) ปฏิเสธไม่ให้แนบคอมเมนต์เข้ากับอะไรก็ตามที่ไม่ได้เป็น `published` อยู่ตอนนั้น และ state machine ของ [Draft → published](/devblog/th/content-workflow/draft-publish/) มี transition เดียวเท่านั้น — `draft → published` — ไม่มีทางย้อนกลับ เอาสองข้อเท็จจริงนี้มารวมกัน: คอมเมนต์มีอยู่ได้แค่บนโพสต์ที่ publish แล้ว *ตอนนี้* เท่านั้น เพราะโพสต์ที่ publish แล้วตอนที่คอมเมนต์ถูกเพิ่มเข้ามาไม่มีวันย้อนกลับไปเป็น `draft` ได้อีก ดังนั้นการดึง `posts(status: PUBLISHED, pageSize: 100)` จึงเป็นรายการที่ครบถ้วนของทุกโพสต์ที่อาจมีคอมเมนต์ pending ไม่ใช่การประมาณ — หน้านี้ไม่ต้องการ `fetchAllPostsForAdmin` จาก [Post editor](/devblog/th/admin/post-editor/) เลยด้วยซ้ำ เพราะพิสูจน์ได้ว่า draft ไม่มีวันเป็น candidate เลย
+
+**fan-out ต่อโพสต์เป็น N+1 ที่ตั้งใจและบอกไว้ตรง ๆ — ตัวที่สองที่คอร์สนี้ยอมรับโดยตั้งใจ** query เดียวสำหรับรายการโพสต์ แล้วเรียก `comments(postId, status: PENDING)` หนึ่งครั้งต่อโพสต์ที่ได้กลับมา ยิงพร้อมกันทั้งหมดด้วย `Promise.all` เป็นรูปแบบเดียวกับที่ [Posts resolver](/devblog/th/graphql-api/posts-resolver/) เคยเรียกชื่อไว้แล้วสำหรับ `PostsResolver.author`: รายการหนึ่ง แล้วมี round trip เพิ่มอีกหนึ่งต่อรายการ บทเรียนนั้นยอมรับมันเพราะ batching แบบ DataLoader ไม่คุ้มที่จะเพิ่มเข้ามาสำหรับสเกลของคอร์สนี้; เหตุผลเดียวกันนี้ใช้ได้ที่นี่เช่นกัน แค่อยู่ฝั่ง client แทนที่จะเป็นเซิร์ฟเวอร์ — admin ที่ refresh คิว moderation ด้วยมือสำหรับโพสต์ไม่กี่ตัวจะไม่มีวันสังเกตเห็น request แบบขนานไม่กี่ตัวหรอก และการสร้าง batching layer สำหรับมันจะเป็นการแก้ปัญหาที่ traffic จริงของคอร์สนี้ไม่เคยมี
+
+**`authorEmail` และ `postId`/`postTitle` ไม่ได้อยู่บน type `Comment` ที่ใช้ร่วมกัน — หน้านี้ extend มันเองในไฟล์** `Comment` interface ที่ใช้ร่วมกันของ [GraphQL client & auth](/devblog/th/frontend-foundations/graphql-client/) มีแค่ `id`, `authorName`, `body` และ `createdAt` — แคบโดยตั้งใจ เพราะแทบทุก caller อื่น (query `comments` สาธารณะใน [Post page](/devblog/th/public-blog/post-page/)) ไม่เคยต้องการอีเมลของ author หรือว่าคอมเมนต์เป็นของโพสต์ไหนเลย หน้านี้ต้องการทั้งสองอย่าง — admin ที่กำลัง moderate คิวต้องรู้ว่าคอมเมนต์เป็นเรื่องของโพสต์ไหน และ `authorEmail` ก็เป็น context ที่มีประโยชน์สำหรับตัดสินว่าอะไรคือ spam แทนที่จะขยาย type ที่ใช้ร่วมกันเพื่อ caller ตัวเดียว หน้านี้ประกาศ `type PendingComment = Comment & { authorEmail: string; postId: string; postTitle: string }` แล้วขอฟิลด์เพิ่มที่ API มีอยู่จริง (`authorEmail`) ใน query ของตัวเอง จากนั้นแนบ `postId`/`postTitle` เองจากโพสต์ที่ fan-out request ของแต่ละคอมเมนต์มาจาก — มันไม่มีวันได้กลับมาจาก `comments` เองอยู่แล้ว เพราะฟิลด์ `postId` ของคอมเมนต์ resolve ผ่าน `@ResolveField()` บน `Comment` และหน้านี้ก็รู้มันอยู่แล้วโดยไม่ต้องถาม เป็นการเคลื่อนไหวแบบ "extend เองในไฟล์ ไม่ขยาย type ที่ใช้ร่วมกัน" เดียวกันเป๊ะกับที่ [Post page](/devblog/th/public-blog/post-page/) ทำกับ `PostWithComments`
+
+**โหลดคิวทั้งหมดใหม่หลังทุก action แทนที่จะแก้ local state ตรงจุด** `handleModerate` เรียก `moderateComment` แล้วเรียก `loadPending()` ใหม่ทั้งหมด แทนที่จะแค่ตัดคอมเมนต์ที่เพิ่งจัดการออกจาก array `comments` นั่นเป็นทางเลือกที่ตั้งใจ ไม่ใช่ทางที่ขี้เกียจ: การ refetch รับประกันว่ารายการของหน้านี้ตรงกับสิ่งที่ `comments(postId, status: PENDING)` จะคืนค่ามาจริง ๆ ตอนนี้ รวมถึงคอมเมนต์ที่มาจาก browser tab อื่นหรือ admin คนอื่นระหว่างที่โหลดหน้าจนถึง action นี้ด้วย การลบแค่ entry เดียวใน array ฝั่ง local นั้นถูกกว่า — ไม่มี round trip — แต่มันสมมติแบบเงียบ ๆ ว่าไม่มีอะไรอื่นในคิวเปลี่ยนไประหว่างนั้น ข้อสมมติที่โปรเจกต์คอร์สที่มี admin คนเดียวรอดตัวไปได้ แต่คิว moderation จริงที่มี moderator มากกว่าหนึ่งคนทำไม่ได้
+
+## Pros & cons
+
+**Refetch คิว pending ทั้งหมดใหม่หลังทุก action (แบบที่เราใช้) เทียบกับการลบแค่คอมเมนต์ที่ moderate แล้วออกจาก state ฝั่ง local** การลบฝั่ง local คือ array `.filter()` ตัวเดียว ไม่มี network round trip และรู้สึกเร็วทันที มันก็ผิดแบบเงียบ ๆ ได้เหมือนกันทันทีที่มันไม่ใช่ source of truth เดียวของสิ่งที่ pending อยู่จริง: คอมเมนต์ที่ admin คนอื่น approve ไปแล้ว หรือคอมเมนต์ใหม่เอี่ยมที่ผู้เข้าชม submit เข้ามา ในช่วงเวลาระหว่างที่หน้านี้โหลดครั้งล่าสุดกับ render ถัดไปจะไม่มีวันปรากฏเลย เพราะไม่มีอะไรบอกคอมโพเนนต์นี้ให้ดูใหม่อีกครั้ง `loadPending()` มีต้นทุนเท่ากับ network round trip ที่มันมีต้นทุนอยู่แล้วเสมอ — ไม่มากไม่น้อยไปกว่านั้น — ทุกครั้ง แลกกับการที่คิวสะท้อน state ปัจจุบันของเซิร์ฟเวอร์เสมอในตอนที่แต่ละ action เสร็จ สำหรับคิว moderation โดยเฉพาะ ที่การซิงค์กับสิ่งที่ pending จริง ๆ สำคัญกว่าการประหยัด refetch หนึ่งครั้ง trade-off นั้นคุ้มที่จะเลือกอย่างชัดเจน แทนที่จะเลือกทางที่ดูถูกกว่าเป็น default
+
+## Set it up
+
+อัปเดต `apps/web/app/admin/admin.module.css` เพิ่ม style ของรายการคอมเมนต์เข้าไป:
+
+```css
+.nav {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  border-bottom: 1px solid var(--color-border);
+  padding: var(--space-3) var(--space-6);
+}
+
+.navLinks {
+  display: flex;
+  gap: var(--space-4);
+}
+
+.logoutButton {
+  background: none;
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-md);
+  padding: var(--space-1) var(--space-3);
+  cursor: pointer;
+  font: inherit;
+}
+
+.checking {
+  padding: var(--space-6);
+  color: var(--color-muted);
+}
+
+.error {
+  color: var(--color-danger);
+  font-size: var(--text-sm);
+}
+
+.table {
+  width: 100%;
+  border-collapse: collapse;
+}
+
+.table th,
+.table td {
+  text-align: left;
+  padding: var(--space-2) var(--space-3);
+  border-bottom: 1px solid var(--color-border);
+}
+
+.actions {
+  display: flex;
+  gap: var(--space-3);
+}
+
+.commentList {
+  list-style: none;
+  padding: 0;
+}
+
+.commentCard {
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-md);
+  padding: var(--space-3);
+  margin-bottom: var(--space-3);
+}
+
+.commentMeta {
+  color: var(--color-muted);
+  font-size: var(--text-sm);
+  margin: 0 0 var(--space-2);
+}
+```
+
+`.actions` ถูกใช้ซ้ำเหมือนเดิมจาก [Post editor](/devblog/th/admin/post-editor/) — flex row ของปุ่มแบบเดียวกันที่มี gap `--space-3` เข้ากับคู่ Approve/Reject ได้พอ ๆ กับที่มันเข้ากับ Edit/Publish/Delete
+
+สร้าง `apps/web/app/admin/comments/page.tsx`:
+
+```tsx
+'use client';
+
+import { useEffect, useState } from 'react';
+import { getToken } from '@/lib/auth';
+import { gqlFetch } from '@/lib/graphql';
+import type { Comment } from '@/lib/graphql';
+import styles from '../admin.module.css';
+
+type PendingComment = Comment & {
+  authorEmail: string;
+  postId: string;
+  postTitle: string;
+};
+
+const POSTS_FOR_MODERATION_QUERY = `
+  query PostsForModeration($pageSize: Int) {
+    posts(status: PUBLISHED, pageSize: $pageSize) {
+      items {
+        id
+        title
+      }
+    }
+  }
+`;
+
+const PENDING_COMMENTS_QUERY = `
+  query PendingComments($postId: ID!) {
+    comments(postId: $postId, status: PENDING) {
+      id
+      authorName
+      authorEmail
+      body
+      createdAt
+    }
+  }
+`;
+
+const MODERATE_COMMENT_MUTATION = `
+  mutation ModerateComment($id: ID!, $status: CommentStatus!) {
+    moderateComment(id: $id, status: $status) {
+      id
+      status
+    }
+  }
+`;
+
+export default function AdminCommentsPage() {
+  const [comments, setComments] = useState<PendingComment[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
+  const [actioningId, setActioningId] = useState<string | null>(null);
+
+  async function loadPending() {
+    const token = getToken();
+    if (!token) {
+      return;
+    }
+    setLoading(true);
+    setError(null);
+    try {
+      const { posts } = await gqlFetch<{ posts: { items: { id: string; title: string }[] } }>(
+        POSTS_FOR_MODERATION_QUERY,
+        { pageSize: 100 },
+        { token },
+      );
+
+      const perPost = await Promise.all(
+        posts.items.map(async (post) => {
+          const { comments: pending } = await gqlFetch<{
+            comments: (Comment & { authorEmail: string })[];
+          }>(PENDING_COMMENTS_QUERY, { postId: post.id }, { token });
+          return pending.map((comment) => ({
+            ...comment,
+            postId: post.id,
+            postTitle: post.title,
+          }));
+        }),
+      );
+
+      setComments(perPost.flat());
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Failed to load pending comments.');
+    } finally {
+      setLoading(false);
+    }
+  }
+
+  useEffect(() => {
+    loadPending();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  async function handleModerate(id: string, status: 'APPROVED' | 'REJECTED') {
+    const token = getToken();
+    if (!token) {
+      return;
+    }
+    setActioningId(id);
+    setError(null);
+    try {
+      await gqlFetch(MODERATE_COMMENT_MUTATION, { id, status }, { token });
+      await loadPending();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Failed to moderate comment.');
+    } finally {
+      setActioningId(null);
+    }
+  }
+
+  if (loading) {
+    return <p>Loading pending comments…</p>;
+  }
+
+  return (
+    <div>
+      <h1>Pending comments</h1>
+      {error && (
+        <p className={styles.error} role="alert">
+          {error}
+        </p>
+      )}
+      {comments.length === 0 ? (
+        <p>No comments awaiting moderation.</p>
+      ) : (
+        <ul className={styles.commentList}>
+          {comments.map((comment) => (
+            <li key={comment.id} className={styles.commentCard}>
+              <p className={styles.commentMeta}>
+                On <strong>{comment.postTitle}</strong> — {comment.authorName} (
+                {comment.authorEmail})
+              </p>
+              <p>{comment.body}</p>
+              <div className={styles.actions}>
+                <button
+                  onClick={() => handleModerate(comment.id, 'APPROVED')}
+                  disabled={actioningId === comment.id}
+                >
+                  Approve
+                </button>
+                <button
+                  onClick={() => handleModerate(comment.id, 'REJECTED')}
+                  disabled={actioningId === comment.id}
+                >
+                  Reject
+                </button>
+              </div>
+            </li>
+          ))}
+        </ul>
+      )}
+    </div>
+  );
+}
+```
+
+- **`POSTS_FOR_MODERATION_QUERY` hardcode `status: PUBLISHED`** ไว้ตรง ๆ ใน query document แทนที่จะรับเป็น variable `$status` — ต่างจาก `fetchAllPostsForAdmin` ใน [Post editor](/devblog/th/admin/post-editor/) หน้านี้ไม่เคยขออะไรนอกจากโพสต์ที่ publish แล้วเลย ดังนั้นไม่คุ้มที่จะเพิ่ม variable สำหรับค่าที่ไม่เคยเปลี่ยน
+- **`posts.items.map(async (post) => ...)` ข้างใน `Promise.all`** ยิง request `comments(postId, status: PENDING)` ของทุกโพสต์พร้อมกันในเวลาเดียวกัน แทนที่จะทำทีละอันตามลำดับ — รูปแบบยิงพร้อมกันทั้งหมดแบบเดียวกับที่ `fetchAllPostsForAdmin` ใช้ไปแล้วสำหรับสองการเรียก status ของมัน แค่ fan-out ออกไปตามจำนวนโพสต์ที่ publish แล้วมีอยู่ แทนที่จะเป็นสองตัวตายตัว
+- **parameter `status` ของ `handleModerate` type เป็น literal union `'APPROVED' | 'REJECTED'`** ไม่ใช่ `string` เฉย ๆ — ปุ่มสองตัวเป็นสองทางเดียวเท่านั้นที่ฟังก์ชันนี้ถูกเรียก และ literal type ทำให้ typo (`'Approve'`, `'approved'`) กลายเป็น compile error แทนที่จะเป็น 400 แบบเงียบ ๆ จาก validation ของ enum `CommentStatus` ของ API
+- **ไม่ได้ส่ง generic ให้ `gqlFetch` ใน `handleModerate`** — ผลลัพธ์ของมันไม่เคยถูกใช้เลย แค่ await เพื่อรอความสำเร็จ/ล้มเหลวเท่านั้น; `loadPending()` ที่ตามมาทันทีต่างหากที่รีเฟรชสิ่งที่แสดงบนหน้าจอจริง ๆ
+
+## Verify
+
+```bash
+cd apps/web
+npm run dev
+```
+
+ใช้คอมเมนต์ pending ที่สร้างไว้ตอน Verify section ของ [The comment model](/devblog/th/comments/comment-model/) (หรือคอมเมนต์ใหม่ที่ submit ผ่าน `CommentForm` ของโพสต์ที่ publish แล้วที่ `/posts/<slug>`) ล็อกอินเข้า `/admin` ด้วย account role `admin` แล้วเปิด `/admin/comments` คอมเมนต์นั้นควรปรากฏ แสดง post title, ชื่อ author และอีเมลที่ถูกต้อง
+
+คลิก **Approve** คอมเมนต์ควรหายไปจากคิวนี้ — `loadPending()` รันใหม่และมันไม่ใช่ `PENDING` อีกแล้ว — และการรัน query `comments` สาธารณะสำหรับโพสต์นั้น (หรือ reload หน้าที่ `/posts/<slug>`) ควรแสดงมันแล้ว ตรงกับ Verify section ของ [Moderation](/devblog/th/comments/moderation/) เป๊ะ
+
+Submit คอมเมนต์ใหม่เอี่ยมบนโพสต์ที่ publish แล้ว (ผ่าน `CommentForm` สาธารณะ) แล้ว reload `/admin/comments` โดยไม่แตะอะไรอื่นเลย — คอมเมนต์ใหม่ควรปรากฏในคิว พิสูจน์ว่าหน้านี้สะท้อนชุด pending ปัจจุบันของ API ทุกครั้งที่โหลด ไม่ใช่ snapshot เก่าตั้งแต่ตอนที่โมดูลนี้ถูกเขียนครั้งแรก คลิก **Reject** บนมัน แล้วยืนยันว่า query `comments` สาธารณะยังไม่คืนค่ามันเลย — `REJECTED` มองไม่เห็นจาก public view พอ ๆ กับตอนที่เป็น `PENDING`
+
+สุดท้าย ยืนยันว่าเซิร์ฟเวอร์ ไม่ใช่หน้านี้ เป็นตัวบังคับใช้กฎจริงว่าใคร moderate ได้ ล็อกอินด้วย account role `author` แทน `admin` แล้วลองคลิก **Approve** บนคอมเมนต์ pending ตัวไหนก็ได้ — มันควร fail พร้อมการปฏิเสธของ API แสดงผ่าน error banner ของหน้านี้เอง พฤติกรรม `moderateComment`-จำกัดเฉพาะ-`admin` แบบเดียวกับที่ Verify section ของ [Moderation](/devblog/th/comments/moderation/) เคยแสดงให้เห็นตรง ๆ กับ Apollo Sandbox มาแล้ว
+
+## Recap
+
+`/admin/comments` รวบรวมคิว moderation ที่ API นี้ไม่มี query เดียวรองรับ: ดึงทุกโพสต์ที่ publish แล้ว (โพสต์เดียวที่มีคอมเมนต์ได้ เพราะไม่มีทาง unpublish) fan out เรียก `comments(postId, status: PENDING)` หนึ่งครั้งต่อโพสต์แบบขนาน แล้วแบนผลลัพธ์รวมกันเป็น `PendingComment[]` ที่ type ไว้เองในไฟล์ ซึ่ง extend type `Comment` ที่ใช้ร่วมกันด้วยฟิลด์ `authorEmail`/`postId`/`postTitle` ที่หน้านี้ต้องการแต่ caller อื่นไม่ต้องการ **Approve** และ **Reject** ทั้งคู่เรียก mutation `moderateComment` ตัวเดียวกันด้วย `status` ที่ต่างกัน และทั้งคู่ trigger การ refetch `loadPending()` เต็มรูปแบบหลังจากนั้น แทนที่จะตัด local ที่ถูกกว่า — เป็นทางเลือกที่ตั้งใจเพื่อให้คิวที่มองเห็นตรงกับชุด pending จริงของเซิร์ฟเวอร์ ไม่ใช่แค่สิ่งที่หน้านี้บังเอิญโหลดมาครั้งเดียว นั่นคือการปิด Module 10: authentication ที่ gate พื้นที่ `/admin` ทั้งหมด, post editor ที่ใช้ซ้ำได้พร้อม live preview และคิว moderation — โดยที่การตัดสินใจด้านความปลอดภัยจริงทุกอย่าง ตั้งแต่ต้นจนจบ ยังคงอยู่บน API ทั้งหมด ที่ frontend นี้ทำได้แค่ขอร้องอย่างสุภาพเท่านั้น
+
+ถัดไป: [Testing →](/devblog/th/testing/)
