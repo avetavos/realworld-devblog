@@ -1,0 +1,126 @@
+---
+title: Mongoose connection
+description: "Wire MongooseModule.forRootAsync to MONGODB_URI via ConfigService, register the first feature module with MongooseModule.forFeature, and verify the connection on boot."
+sidebar:
+  order: 2
+---
+
+## What we're building
+
+`MongooseModule.forRootAsync` in `app.module.ts`, reading `MONGODB_URI` through the same `ConfigService` `main.ts` already uses for `API_PORT` and `WEB_ORIGIN`. Alongside it, `apps/api/src/posts/posts.module.ts` — the first feature module in the app, registering the `Post` schema from [Schemas](/devblog/en/data-modeling/schemas/) with `MongooseModule.forFeature`. `UsersModule`, `TagsModule`, and `CommentsModule` follow the identical shape in later modules.
+
+## Why
+
+`MongooseModule` has two static methods for a reason: `forRoot`/`forRootAsync` open the one physical connection to MongoDB, and `forFeature`/`forFeatureAsync` register individual schemas as injectable models against that already-open connection. Every module in the app shares the one connection from `forRoot`; each feature module calls `forFeature` only for the schemas it actually uses. `PostsModule` importing `MongooseModule.forFeature([{ name: Post.name, schema: PostSchema }])` is what makes `@InjectModel(Post.name)` resolve to a working `Model<PostDocument>` inside `PostsService` — without it, Nest has nothing registered under that name and injection fails at startup.
+
+`forRootAsync` instead of `forRoot` is the same trade-off `main.ts` already made for `API_PORT`: the connection string can't be a literal string in the module's static `imports` array, because it has to come from `ConfigService`, and `ConfigService` doesn't exist until Nest's DI container has been built. `useFactory` defers building the connection options until `inject: [ConfigService]` resolves, at module-instantiation time rather than module-declaration time.
+
+## Pros & cons
+
+**`forRootAsync` + `useFactory` vs. a hardcoded `forRoot('mongodb://...')`.** The hardcoded form is one line and needs no `inject` array — but it means the connection string, including credentials, lives in source code and can't differ between environments without editing and redeploying that source. `forRootAsync` costs a small amount of indirection (a factory function instead of a literal) in exchange for the connection string coming from `.env` — the same file [Repo layout](/devblog/en/setup/repo-layout/) already keeps out of git.
+
+**One `forFeature` call per feature module vs. registering every schema once in `AppModule`.** Declaring all four schemas' `forFeature` calls directly in `AppModule` would work and save four import lines — but it means `AppModule` has to know about every model in the system, and any module that only needs `Post` still has `Comment` and `Tag` models available to inject, whether it should or not. Scoping `forFeature` to the module that owns that data keeps each feature module self-contained: `PostsModule` declares exactly the one dependency it has on Mongoose, and a unit test for `PostsService` only needs to mock that one model.
+
+## Set it up
+
+Update `apps/api/src/app.module.ts` to open the Mongoose connection and register `PostsModule`:
+
+```ts
+import { Module } from '@nestjs/common';
+import { ConfigModule, ConfigService } from '@nestjs/config';
+import { MongooseModule } from '@nestjs/mongoose';
+import { Logger } from '@nestjs/common';
+import { Connection } from 'mongoose';
+import { AppController } from './app.controller';
+import { AppService } from './app.service';
+import { PostsModule } from './posts/posts.module';
+
+@Module({
+  imports: [
+    ConfigModule.forRoot({
+      isGlobal: true,
+      envFilePath: '../../.env',
+    }),
+    MongooseModule.forRootAsync({
+      inject: [ConfigService],
+      useFactory: (configService: ConfigService) => ({
+        uri: configService.getOrThrow<string>('MONGODB_URI'),
+        onConnectionCreate: (connection: Connection) => {
+          connection.on('connected', () =>
+            new Logger('MongooseModule').log('MongoDB connected'),
+          );
+          return connection;
+        },
+      }),
+    }),
+    PostsModule,
+  ],
+  controllers: [AppController],
+  providers: [AppService],
+})
+export class AppModule {}
+```
+
+- **`getOrThrow<string>('MONGODB_URI')`** — fails fast with a clear error at boot if `MONGODB_URI` is missing, instead of Mongoose retrying a connection to `undefined` and failing with a confusing driver error later.
+- **`onConnectionCreate`** — a hook `@nestjs/mongoose` calls with the raw Mongoose `Connection` as soon as it's created, before `forRootAsync` returns. Attaching a `connected` listener here is what makes the connection state visible in the boot log without polling anything.
+
+Create `apps/api/src/posts/posts.service.ts`, using the `Post`/`PostDocument` schema from [Schemas](/devblog/en/data-modeling/schemas/):
+
+```ts
+import { Injectable, Logger, OnModuleInit } from '@nestjs/common';
+import { InjectModel } from '@nestjs/mongoose';
+import { Model } from 'mongoose';
+import { Post, PostDocument } from './schemas/post.schema';
+
+@Injectable()
+export class PostsService implements OnModuleInit {
+  private readonly logger = new Logger(PostsService.name);
+
+  constructor(
+    @InjectModel(Post.name) private readonly postModel: Model<PostDocument>,
+  ) {}
+
+  async onModuleInit(): Promise<void> {
+    const count = await this.postModel.countDocuments();
+    this.logger.log(`Post documents: ${count}`);
+  }
+}
+```
+
+Create `apps/api/src/posts/posts.module.ts`:
+
+```ts
+import { Module } from '@nestjs/common';
+import { MongooseModule } from '@nestjs/mongoose';
+import { Post, PostSchema } from './schemas/post.schema';
+import { PostsService } from './posts.service';
+
+@Module({
+  imports: [MongooseModule.forFeature([{ name: Post.name, schema: PostSchema }])],
+  providers: [PostsService],
+})
+export class PostsModule {}
+```
+
+`onModuleInit` runs once, after `PostsService`'s own dependencies (the injected `postModel`) are resolved but before the app starts accepting requests — a natural place for a one-time boot check like this document count. Real Posts endpoints arrive in [Content Workflow](/devblog/en/content-workflow/); for now, `PostsService` exists only to prove the `forFeature` wiring works.
+
+## Verify
+
+```bash
+npm run start:dev
+```
+
+```txt
+[Nest] ... LOG [MongooseModule] MongoDB connected
+[Nest] ... LOG [PostsService] Post documents: 0
+[Nest] ... LOG [NestApplication] Nest application successfully started
+API listening on http://localhost:4000
+```
+
+`MongoDB connected` confirms `forRootAsync` read `MONGODB_URI` from `.env` and reached the `mongo` container from [Compose skeleton](/devblog/en/setup/compose-skeleton/) — start it first with `docker compose up -d` in `infra/` if it isn't already running. `Post documents: 0` confirms `forFeature` correctly registered the `Post` model and `@InjectModel` resolved it inside `PostsService` — `0` is expected since nothing has written a post yet.
+
+## Recap
+
+`MongooseModule.forRootAsync` opens the one Mongoose connection the whole app shares, reading `MONGODB_URI` through `ConfigService` the same way `main.ts` reads `API_PORT`. `MongooseModule.forFeature` registers one schema at a time, scoped to the feature module that owns it — `PostsModule` is the first of four, with `UsersModule`, `TagsModule`, and `CommentsModule` following the same shape later in the course. `onConnectionCreate` and `PostsService.onModuleInit` together turn "did the database connection actually work" into something visible in the boot log instead of a silent assumption.
+
+Next: [Config & exceptions →](/devblog/en/backend-foundations/config-exceptions/)

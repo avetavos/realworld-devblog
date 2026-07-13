@@ -1,0 +1,137 @@
+---
+title: The app module
+description: "เชื่อม main.ts และ app.module.ts — CORS, shutdown hooks และ health-check AppController — แล้วดูว่าทำไม NestJS module กับ dependency injection คือ composition pattern ที่ทั้งคอร์สพึ่งพา"
+sidebar:
+  order: 1
+---
+
+## What we're building
+
+สองไฟล์ ที่ [Backend init](/devblog/th/setup/backend-init/) scaffold ไว้แล้ว: `apps/api/src/main.ts` และ `apps/api/src/app.module.ts` บทเรียนนี้แทนที่ controller `Hello World!` เดิมด้วย endpoint `GET /health` จริง และเพิ่ม call สองตัวที่สำคัญกับ production เข้าไปใน bootstrap — `enableCors` กับ `enableShutdownHooks` ทุกโมดูลถัดไปในคอร์สนี้จะเพิ่มลงในสองไฟล์เดิมนี้ ไม่ใช่แทนที่มัน
+
+## Why
+
+NestJS **module** คือคลาสที่มี `@Module()` ประกาศสามอย่าง: มัน owns provider อะไรบ้าง (`providers`), expose controller อะไรบ้าง (`controllers`) และต้องการ module อื่นอะไรบ้าง (`imports`) `AppModule` คือรากของกราฟนั้น — ทุก feature module ที่คอร์สนี้จะสร้างต่อไป (`PostsModule`, `UsersModule` และภายหลัง `TagsModule`, `CommentsModule`) จะถูกเพิ่มเข้า `imports` array ของมัน เหมือนกับที่ `ConfigModule` ถูกเพิ่มใน [Backend init](/devblog/th/setup/backend-init/)
+
+นี่คือครึ่งหนึ่งของระบบ module ที่เรียกว่า **composition**: แทนที่จะมีไฟล์เดียวเชื่อม controller และ service ทุกตัวด้วยมือ แต่ละ module compose ส่วนของแอปที่ครบในตัวเอง แล้ว `AppModule` compose module เหล่านั้นเข้าด้วยกัน อีกครึ่งคือ **dependency injection** `AppController` ไม่ได้สร้าง `AppService` เองด้วย `new AppService()` — มันประกาศ constructor parameter ที่ type เป็น `AppService` แล้ว Nest IoC container จะหา (หรือสร้าง) instance เดียวที่แชร์กันแล้วส่งเข้ามาให้:
+
+```ts
+constructor(private readonly appService: AppService) {}
+```
+
+นี่คือ pattern Dependency Injection / Inversion of Control แบบคลาสสิก: controller พึ่งพา abstraction (ในที่นี้คือแค่คลาส `AppService` เพราะ Nest ไม่บังคับให้ใช้ interface สำหรับ case ง่าย ๆ) แทนที่จะพึ่งขั้นตอนสร้าง instance ที่เป็นรูปธรรม และมีบางอย่างจากภายนอก — container — เป็นคนส่ง instance ให้ ผลลัพธ์เห็นได้ทันทีตอน testing (test module สามารถสลับ `AppService` ปลอมเข้ามาแทนได้โดยไม่ต้องแตะโค้ดของ `AppController` เลย) และเห็นอีกครั้งภายหลังในคอร์สนี้ ตอนที่ [Authentication](/devblog/th/auth/) สลับ `UsersService` จริงเข้าไปใน `JwtStrategy` ด้วยวิธีเดียวกันเป๊ะ ๆ
+
+`ConfigModule.forRoot({ isGlobal: true, ... })` จาก [Backend init](/devblog/th/setup/backend-init/) คือเหตุผลที่ `main.ts` ด้านล่างเรียก `app.get(ConfigService)` ได้โดยที่ `AppModule` ไม่เคย import `ConfigModule` เข้า `imports` array ของ feature module ไหนเลย — global module ลงทะเบียน export ของมันไว้บน root container ซึ่งเข้าถึงได้จากทุกที่
+
+## Pros & cons
+
+**DI container เทียบกับการเชื่อมด้วยมือ** การ `new AppService()` เองใน constructor ของ `AppController` ก็ใช้ได้กับคลาสเล็ก ๆ แบบนี้ และหลีกเลี่ยงความงงแบบ "มันถูกสร้างขึ้นมายังไงกันแน่" ที่คนใหม่กับ Nest มักเจอ มันหยุดได้ผลทันทีที่ `AppService` เองต้องการ dependency (`ConfigService`, Mongoose model) — ทุกที่ที่เรียก `new AppService()` ก็ต้องรู้วิธีสร้าง dependency นั้นด้วย แล้วกราฟของ object ก็จะขยายเร็วมาก container สร้างกราฟทั้งหมดครั้งเดียว เป็น singleton โดย default และแต่ละคลาสแค่ต้องประกาศว่าต้องการอะไร ไม่ต้องรู้วิธีสร้างมัน
+
+**`enableCors({ origin: WEB_ORIGIN, credentials: true })` เทียบกับ `enableCors()`** `enableCors()` เปล่า ๆ จะ reflect origin อะไรก็ได้ ซึ่งใช้ได้กับ demo local แต่ไม่ใช่สิ่งที่ browser จะยอมด้วยซ้ำเมื่อมี cookie หรือ header `Authorization` เข้ามาเกี่ยวข้อง: CORS spec ห้าม `credentials: true` จับคู่กับ origin แบบ wildcard ดังนั้น origin เดียวที่ระบุชัดเจนไม่ใช่แค่ปลอดภัยกว่า — มันจำเป็นทันทีที่ [Authentication](/devblog/th/auth/) เริ่มส่ง request แบบมี credential จากแอป Next.js ต้นทุนคือ environment variable อีกตัว (`WEB_ORIGIN` มีอยู่แล้วใน `.env.example` จาก [Repo layout](/devblog/th/setup/repo-layout/)) ที่ต้องคอยให้ตรงกันระหว่างสองแอป
+
+## Set it up
+
+อัปเดต `apps/api/src/main.ts` ให้เปิด CORS และ shutdown hooks ควบคู่ไปกับ port ที่มาจาก `ConfigService` เดิม:
+
+```ts
+import { NestFactory } from '@nestjs/core';
+import { ConfigService } from '@nestjs/config';
+import { AppModule } from './app.module';
+
+async function bootstrap() {
+  const app = await NestFactory.create(AppModule);
+  const configService = app.get(ConfigService);
+
+  app.enableCors({
+    origin: configService.getOrThrow<string>('WEB_ORIGIN'),
+    credentials: true,
+  });
+
+  app.enableShutdownHooks();
+
+  const port = configService.get<number>('API_PORT') ?? 4000;
+  await app.listen(port);
+  console.log(`API listening on http://localhost:${port}`);
+}
+bootstrap();
+```
+
+- **`enableCors`** — จำกัด request จาก browser ให้เหลือแค่ origin เดียวที่แอป Next.js รันอยู่ (`WEB_ORIGIN`) พร้อม `credentials: true` เพื่อให้ cookie/header `Authorization` ข้าม origin ได้เมื่อมี auth
+- **`enableShutdownHooks`** — ถ้าไม่เรียก call นี้ lifecycle hook `onModuleDestroy`/`onApplicationShutdown` จะไม่ทำงานเมื่อได้รับ `SIGTERM` เลย มันมี overhead ของ listener เล็กน้อย และถูกปิดไว้โดย default ด้วยเหตุนี้ แต่มันคือสิ่งที่ทำให้โมดูลถัดไปปิด Mongoose connection หรือ flush queue ได้อย่างสะอาด แทนที่จะถูก kill กลางคันตอนกำลังเขียนข้อมูล เมื่อ container orchestrator ส่ง `SIGTERM` มา
+
+แทนที่คู่ `AppController`/`AppService` ที่ scaffold ไว้ อัปเดต `apps/api/src/app.controller.ts`:
+
+```ts
+import { Controller, Get } from '@nestjs/common';
+import { AppService } from './app.service';
+
+@Controller()
+export class AppController {
+  constructor(private readonly appService: AppService) {}
+
+  @Get('health')
+  getHealth(): { status: string } {
+    return this.appService.getHealth();
+  }
+}
+```
+
+อัปเดต `apps/api/src/app.service.ts`:
+
+```ts
+import { Injectable } from '@nestjs/common';
+
+@Injectable()
+export class AppService {
+  getHealth(): { status: string } {
+    return { status: 'ok' };
+  }
+}
+```
+
+`app.module.ts` ยังไม่ต้องแก้อะไร — `AppController` และ `AppService` ถูกเชื่อมไว้แล้วจาก [Backend init](/devblog/th/setup/backend-init/):
+
+```ts
+import { Module } from '@nestjs/common';
+import { ConfigModule } from '@nestjs/config';
+import { AppController } from './app.controller';
+import { AppService } from './app.service';
+
+@Module({
+  imports: [
+    ConfigModule.forRoot({
+      isGlobal: true,
+      envFilePath: '../../.env',
+    }),
+  ],
+  controllers: [AppController],
+  providers: [AppService],
+})
+export class AppModule {}
+```
+
+## Verify
+
+```bash
+npm run start:dev
+```
+
+```txt
+[Nest] ... LOG [NestApplication] Nest application successfully started
+API listening on http://localhost:4000
+```
+
+ในเทอร์มินัลอีกอัน:
+
+```bash
+curl localhost:4000/health
+# {"status":"ok"}
+```
+
+`AppController` ที่คืนค่า `{"status":"ok"}` ยืนยันว่ากราฟ DI resolve สำเร็จ — `AppController` ได้ instance ของ `AppService` จริง ๆ โดยไม่มีฝั่งไหนเชื่อมด้วยมือเลย — และ `enableCors`/`enableShutdownHooks` ไม่ได้ทำให้ startup พัง ตอนนี้ยังไม่มี browser request ให้เห็น CORS ปฏิเสธ origin ที่ผิดจริง ๆ นั่นจะเห็นได้ชัดตอนที่ [Frontend Foundations](/devblog/th/frontend-foundations/) ยิง request จริงจากแอป Next.js
+
+## Recap
+
+`AppModule` compose provider, controller และ (ในที่สุด) feature module เข้าเป็นกราฟเดียว; Nest IoC container resolve กราฟนั้นแล้ว inject dependency ที่แต่ละคลาสประกาศไว้แทนที่จะให้คลาสสร้างกันเองด้วยมือ `main.ts` ตอนนี้เปิด CORS ที่จำกัดแค่ `WEB_ORIGIN` พร้อม credentials และ shutdown hooks เพื่อให้ lifecycle cleanup ทำงานตอน `SIGTERM` `GET /health` แทนที่ `Hello World!` ที่ scaffold ไว้ และเป็น endpoint จริงตัวแรกของ API — ทุกโมดูลถัดไปจะขยายมันหรือเพิ่มเข้าไปข้าง ๆ
+
+ถัดไป: [Mongoose connection →](/devblog/th/backend-foundations/mongoose-connection/)

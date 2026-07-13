@@ -1,0 +1,207 @@
+---
+title: Config & exceptions
+description: "Validate every environment variable at boot with a Joi schema, and add a global AllExceptionsFilter that logs errors and returns a structured, safe response."
+sidebar:
+  order: 3
+---
+
+## What we're building
+
+A Joi `validationSchema` on `ConfigModule.forRoot`, so a missing or malformed `.env` value fails at boot with one clear error instead of surfacing later as `undefined` deep in a service. Alongside it, `apps/api/src/common/filters/all-exceptions.filter.ts` — a global `AllExceptionsFilter` that catches every unhandled exception, logs it with Nest's `Logger`, and returns a structured JSON error body that never leaks a stack trace or an internal error message to the client.
+
+## Why
+
+Without validation, `.env` typos are silent. `MONGODB_URRI=...` (a typo) or a missing `JWT_SECRET` doesn't fail `ConfigModule.forRoot` — it just means `configService.get('JWT_SECRET')` returns `undefined` the first time something calls it, potentially deep inside [Authentication](/devblog/en/auth/)'s token-signing code, with an error message that has nothing to do with the actual cause. A `validationSchema` runs once, at boot, against every loaded variable, and throws immediately with the variable name if something's wrong — the same "fail fast, fail loud" reasoning as [Mongoose connection](/devblog/en/backend-foundations/mongoose-connection/)'s `getOrThrow`, applied to every variable at once instead of one at a time.
+
+The global exception filter exists for a different failure mode: an *unhandled* error. `NotFoundException`/`BadRequestException` thrown deliberately already produce a sensible HTTP response on their own — Nest's default exception handling does that without any custom filter. What it doesn't do safely by default is handle something unexpected: a Mongoose cast error, a null-dereference bug, any plain `Error` thrown somewhere. Left alone, Nest's default handler for those still returns `500` but with a generic body — the real risk is a *custom* filter written carelessly that echoes `exception.message` or `exception.stack` straight into the response, handing an attacker internal file paths, query fragments, or library versions. `AllExceptionsFilter` centralizes the decision once: known `HttpException`s pass their safe, client-facing message through; anything else becomes a fixed `Internal server error` string, with the real detail going only to the server log via `Logger`.
+
+## Pros & cons
+
+**Joi vs. zod for env validation.** Both validate a plain object against a schema and both work fine here. This course uses Joi because it's what `@nestjs/config`'s own documentation ships as the reference example, and its `.required()`/`.default()`/`.valid()` chain reads close to plain English for a small, flat schema like this one. zod's advantage — deriving a static TypeScript type from the schema with `z.infer` — matters more once a schema is deeply nested or reused as an app-wide type; for four flat environment variables, that benefit doesn't outweigh following the framework's own convention.
+
+**Catching everything (`@Catch()`) vs. catching only `HttpException`.** A filter scoped to `@Catch(HttpException)` only ever sees errors Nest or this codebase threw on purpose — anything else (a driver error, a bug) falls through to Nest's built-in default handler, which is safe but generic and unlogged by this filter. `@Catch()` with no argument catches literally everything, which is what makes the "never leak internals" guarantee actually hold for *every* code path, not just the ones a developer remembered to wrap in a deliberate `throw new HttpException(...)`. The cost is that the filter's `catch` method now has to branch on `exception instanceof HttpException` itself, rather than trusting the type Nest would otherwise narrow for it.
+
+**How this coexists with GraphQL error formatting.** `AllExceptionsFilter` below reads the request through `host.switchToHttp()`, which assumes an HTTP request/response pair exists. That's true for every endpoint in this module, but [GraphQL API](/devblog/en/graphql-api/) resolves fields through Apollo Server, not Express directly — there is no `Response` object for `httpAdapter.reply()` to write to. Apollo has its own error-formatting layer (`formatError`) that this filter doesn't touch and doesn't need to: a resolver throwing `NotFoundException` still reaches the client as a structured GraphQL error in the `errors` array, through Apollo's own pipeline, not this filter's. [GraphQL API](/devblog/en/graphql-api/) covers configuring `formatError` to apply the same "don't leak internals" rule on that separate path.
+
+## Set it up
+
+Install Joi:
+
+```bash
+cd apps/api
+npm install joi
+```
+
+Update `apps/api/src/app.module.ts` to validate `.env` on boot:
+
+```ts
+import { Module } from '@nestjs/common';
+import { ConfigModule, ConfigService } from '@nestjs/config';
+import { MongooseModule } from '@nestjs/mongoose';
+import { Logger } from '@nestjs/common';
+import { Connection } from 'mongoose';
+import * as Joi from 'joi';
+import { AppController } from './app.controller';
+import { AppService } from './app.service';
+import { PostsModule } from './posts/posts.module';
+
+@Module({
+  imports: [
+    ConfigModule.forRoot({
+      isGlobal: true,
+      envFilePath: '../../.env',
+      validationSchema: Joi.object({
+        MONGODB_URI: Joi.string().uri().required(),
+        JWT_SECRET: Joi.string().min(10).required(),
+        API_PORT: Joi.number().port().default(4000),
+        WEB_ORIGIN: Joi.string().uri().required(),
+      }),
+      validationOptions: {
+        allowUnknown: true,
+        abortEarly: false,
+      },
+    }),
+    MongooseModule.forRootAsync({
+      inject: [ConfigService],
+      useFactory: (configService: ConfigService) => ({
+        uri: configService.getOrThrow<string>('MONGODB_URI'),
+        onConnectionCreate: (connection: Connection) => {
+          connection.on('connected', () =>
+            new Logger('MongooseModule').log('MongoDB connected'),
+          );
+          return connection;
+        },
+      }),
+    }),
+    PostsModule,
+  ],
+  controllers: [AppController],
+  providers: [AppService],
+})
+export class AppModule {}
+```
+
+- **`allowUnknown: true`** — required here specifically because the root `.env` from [Repo layout](/devblog/en/setup/repo-layout/) is shared by both apps: `NEXT_PUBLIC_API_URL` belongs to the Next.js app, not this schema, and `allowUnknown: false` (Joi's default) would fail every boot over a variable this app never reads.
+- **`abortEarly: false`** — reports every invalid/missing variable in one error, instead of stopping at the first one and forcing a fix-rerun-fix cycle.
+- Only the four variables this app actually reads (`MONGODB_URI`, `JWT_SECRET`, `API_PORT`, `WEB_ORIGIN`) are validated — `JWT_SECRET` isn't read by any code yet, but validating it now means [Authentication](/devblog/en/auth/) never has to add env validation later.
+
+Create `apps/api/src/common/filters/all-exceptions.filter.ts`:
+
+```ts
+import {
+  ArgumentsHost,
+  Catch,
+  ExceptionFilter,
+  HttpException,
+  HttpStatus,
+  Logger,
+} from '@nestjs/common';
+import { HttpAdapterHost } from '@nestjs/core';
+
+@Catch()
+export class AllExceptionsFilter implements ExceptionFilter {
+  private readonly logger = new Logger(AllExceptionsFilter.name);
+
+  constructor(private readonly httpAdapterHost: HttpAdapterHost) {}
+
+  catch(exception: unknown, host: ArgumentsHost): void {
+    // Resolved here, not in the constructor: httpAdapter may not be
+    // set yet when the filter is instantiated.
+    const { httpAdapter } = this.httpAdapterHost;
+    const ctx = host.switchToHttp();
+    const request = ctx.getRequest();
+
+    const isHttpException = exception instanceof HttpException;
+    const status = isHttpException
+      ? exception.getStatus()
+      : HttpStatus.INTERNAL_SERVER_ERROR;
+    const message = isHttpException
+      ? exception.getResponse()
+      : 'Internal server error';
+
+    if (!isHttpException) {
+      this.logger.error(
+        exception instanceof Error ? exception.stack : exception,
+      );
+    } else if (status >= HttpStatus.INTERNAL_SERVER_ERROR) {
+      this.logger.error(exception.message, exception.stack);
+    }
+
+    const responseBody = {
+      statusCode: status,
+      timestamp: new Date().toISOString(),
+      path: httpAdapter.getRequestUrl(request),
+      message,
+    };
+
+    httpAdapter.reply(ctx.getResponse(), responseBody, status);
+  }
+}
+```
+
+- **`@Catch()`** with no argument matches every exception type, not just `HttpException` subclasses.
+- **`exception.getResponse()`** is what a deliberately-thrown `NotFoundException('Post not found')` already carries — that message is safe to return as-is, since a developer chose to put it in front of a client. Anything that *isn't* an `HttpException` collapses to the fixed string `'Internal server error'` — the caller never sees whatever the real error actually said.
+- **`this.logger.error(...)`** runs only on the two paths that matter for debugging: genuinely unhandled errors, and `HttpException`s at `500` or above (a `4xx` like a validation error isn't a bug and doesn't need a log entry).
+
+Register it globally in `apps/api/src/main.ts`:
+
+```ts
+import { NestFactory, HttpAdapterHost } from '@nestjs/core';
+import { ConfigService } from '@nestjs/config';
+import { AppModule } from './app.module';
+import { AllExceptionsFilter } from './common/filters/all-exceptions.filter';
+
+async function bootstrap() {
+  const app = await NestFactory.create(AppModule);
+  const configService = app.get(ConfigService);
+
+  app.enableCors({
+    origin: configService.getOrThrow<string>('WEB_ORIGIN'),
+    credentials: true,
+  });
+
+  const httpAdapterHost = app.get(HttpAdapterHost);
+  app.useGlobalFilters(new AllExceptionsFilter(httpAdapterHost));
+
+  app.enableShutdownHooks();
+
+  const port = configService.get<number>('API_PORT') ?? 4000;
+  await app.listen(port);
+  console.log(`API listening on http://localhost:${port}`);
+}
+bootstrap();
+```
+
+`useGlobalFilters` needs an *instance*, not a class, because `AllExceptionsFilter`'s constructor takes `HttpAdapterHost` — a dependency this module-less filter can't get from Nest's DI container on its own, so `main.ts` resolves it manually with `app.get(HttpAdapterHost)` and passes it in by hand.
+
+## Verify
+
+Break `.env` on purpose to see validation fail loudly — comment out `JWT_SECRET`:
+
+```bash
+npm run start:dev
+```
+
+```txt
+Error: Config validation error: "JWT_SECRET" is required
+```
+
+Restore `.env`, then trigger the exception filter with a route that doesn't exist:
+
+```bash
+npm run start:dev
+curl -i localhost:4000/does-not-exist
+```
+
+```txt
+HTTP/1.1 404 Not Found
+{"statusCode":404,"timestamp":"...","path":"/does-not-exist","message":"Cannot GET /does-not-exist"}
+```
+
+That `404` is Nest's own routing exception, an `HttpException`, passing through `AllExceptionsFilter` with its message intact — confirming the filter is wired in without changing behavior for exceptions that were already safe to show.
+
+## Recap
+
+`validationSchema` on `ConfigModule.forRoot` turns a missing or malformed `.env` value into one loud boot-time error instead of a silent `undefined` surfacing later; `allowUnknown: true` is required because `.env` is shared with the Next.js app. `AllExceptionsFilter` catches every exception, logs unexpected ones with `Logger`, and always returns a structured body — the client-facing message from `HttpException.getResponse()` when the error was deliberate, a fixed `'Internal server error'` string otherwise. It runs on the HTTP path only; [GraphQL API](/devblog/en/graphql-api/) applies the same no-leak rule to resolvers through Apollo's own `formatError`.
+
+Next: [Validation →](/devblog/en/backend-foundations/validation/)

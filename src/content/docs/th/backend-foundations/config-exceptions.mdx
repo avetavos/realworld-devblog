@@ -1,0 +1,207 @@
+---
+title: Config & exceptions
+description: "Validate environment variable ทุกตัวตอน boot ด้วย Joi schema แล้วเพิ่ม global AllExceptionsFilter ที่ log error และคืน response ที่มีโครงสร้างและปลอดภัย"
+sidebar:
+  order: 3
+---
+
+## What we're building
+
+`validationSchema` แบบ Joi บน `ConfigModule.forRoot` เพื่อให้ค่าใน `.env` ที่หายไปหรือผิดรูปแบบ fail ตอน boot ด้วย error ที่ชัดเจนตัวเดียว แทนที่จะโผล่มาเป็น `undefined` ลึก ๆ ในบาง service ทีหลัง ควบคู่กันคือ `apps/api/src/common/filters/all-exceptions.filter.ts` — `AllExceptionsFilter` แบบ global ที่ดักทุก exception ที่ไม่ถูกจัดการ log มันด้วย `Logger` ของ Nest แล้วคืน error body แบบ JSON ที่มีโครงสร้าง ไม่มีวันรั่ว stack trace หรือ internal error message ให้ client เห็น
+
+## Why
+
+ถ้าไม่มีการ validate typo ใน `.env` จะเงียบมาก `MONGODB_URRI=...` (พิมพ์ผิด) หรือ `JWT_SECRET` ที่หายไปไม่ทำให้ `ConfigModule.forRoot` fail — มันแค่ทำให้ `configService.get('JWT_SECRET')` คืน `undefined` ครั้งแรกที่มีอะไรเรียกมัน ซึ่งอาจลึกอยู่ในโค้ด sign token ของ [Authentication](/devblog/th/auth/) พร้อม error message ที่ไม่เกี่ยวอะไรกับสาเหตุจริงเลย `validationSchema` รันครั้งเดียวตอน boot กับทุก variable ที่โหลดมา แล้ว throw ทันทีพร้อมชื่อ variable ถ้ามีอะไรผิด — เหตุผลแบบ "fail fast, fail loud" เดียวกับ `getOrThrow` ใน [Mongoose connection](/devblog/th/backend-foundations/mongoose-connection/) แค่ใช้กับทุก variable พร้อมกันแทนที่จะทีละตัว
+
+Global exception filter มีไว้สำหรับ failure mode อีกแบบ: error ที่ *ไม่ถูกจัดการ* `NotFoundException`/`BadRequestException` ที่ throw ตั้งใจอยู่แล้วสร้าง HTTP response ที่สมเหตุสมผลได้เองอยู่แล้ว — การจัดการ exception แบบ default ของ Nest ทำแบบนั้นได้โดยไม่ต้องมี custom filter เลย สิ่งที่มันไม่ได้จัดการอย่างปลอดภัยโดย default คือสิ่งที่ไม่คาดคิด: Mongoose cast error, bug ที่ null-dereference, `Error` ธรรมดาที่ throw มาจากที่ไหนสักแห่ง ถ้าปล่อยไว้เฉย ๆ handler default ของ Nest สำหรับกรณีเหล่านั้นก็ยังคืน `500` แต่ด้วย body ทั่วไป — ความเสี่ยงจริง ๆ คือ *custom* filter ที่เขียนแบบไม่ระวังแล้ว echo `exception.message` หรือ `exception.stack` ตรง ๆ ลงใน response ซึ่งยื่น path ไฟล์ภายใน, query fragment หรือ library version ให้ attacker `AllExceptionsFilter` รวมการตัดสินใจไว้ที่เดียว: `HttpException` ที่ตั้งใจ throw จะส่งผ่าน message ที่ปลอดภัยและ client เห็นได้; อย่างอื่นจะกลายเป็น string คงที่ `Internal server error` โดยรายละเอียดจริงไปที่ server log ผ่าน `Logger` เท่านั้น
+
+## Pros & cons
+
+**Joi เทียบกับ zod สำหรับ validate env** ทั้งคู่ validate plain object เทียบกับ schema และใช้ได้ดีทั้งคู่ที่นี่ คอร์สนี้ใช้ Joi เพราะมันคือตัวอย่างอ้างอิงที่เอกสารของ `@nestjs/config` เองใช้ และ chain `.required()`/`.default()`/`.valid()` ของมันอ่านใกล้เคียงภาษาอังกฤษธรรมดาสำหรับ schema แบบแบน ๆ เล็ก ๆ แบบนี้ ข้อได้เปรียบของ zod — การ derive static TypeScript type จาก schema ด้วย `z.infer` — มีความสำคัญมากขึ้นเมื่อ schema ซ้อนลึกหรือถูกใช้ซ้ำเป็น type ทั้งแอป สำหรับ environment variable แบนสี่ตัว ประโยชน์นั้นไม่คุ้มกับการไม่ตาม convention ของ framework เอง
+
+**การดักทุกอย่าง (`@Catch()`) เทียบกับดักเฉพาะ `HttpException`** filter ที่จำกัดแค่ `@Catch(HttpException)` จะเห็นแค่ error ที่ Nest หรือโค้ดเซ็ตนี้ throw ตั้งใจเท่านั้น — อย่างอื่น (driver error, bug) จะหลุดไปที่ default handler ของ Nest ซึ่งปลอดภัยแต่ทั่วไปและไม่ถูก log โดย filter นี้ `@Catch()` แบบไม่มี argument ดักทุกอย่างจริง ๆ ซึ่งคือสิ่งที่ทำให้การรับประกัน "ไม่รั่ว internal" เป็นจริงได้กับทุก code path ไม่ใช่แค่ตัวที่ developer จำได้ว่าต้องห่อด้วย `throw new HttpException(...)` ตั้งใจ ต้นทุนคือ method `catch` ของ filter ต้อง branch ด้วย `exception instanceof HttpException` เอง แทนที่จะเชื่อ type ที่ Nest จะ narrow ให้อยู่แล้ว
+
+**มันอยู่ร่วมกับ GraphQL error formatting ยังไง** `AllExceptionsFilter` ด้านล่างอ่าน request ผ่าน `host.switchToHttp()` ซึ่งสมมติว่ามีคู่ HTTP request/response อยู่จริง นั่นเป็นจริงสำหรับทุก endpoint ในโมดูลนี้ แต่ [GraphQL API](/devblog/th/graphql-api/) resolve field ผ่าน Apollo Server ไม่ใช่ Express ตรง ๆ — ไม่มี `Response` object ให้ `httpAdapter.reply()` เขียนลงไป Apollo มี error-formatting layer ของตัวเอง (`formatError`) ที่ filter นี้ไม่ได้แตะและไม่ต้องแตะด้วย: resolver ที่ throw `NotFoundException` ยังไปถึง client เป็น GraphQL error ที่มีโครงสร้างใน array `errors` ผ่าน pipeline ของ Apollo เอง ไม่ใช่ของ filter นี้ [GraphQL API](/devblog/th/graphql-api/) จะพูดถึงการตั้งค่า `formatError` ให้ใช้กฎ "ไม่รั่ว internal" เดียวกันบน path แยกนั้น
+
+## Set it up
+
+ติดตั้ง Joi:
+
+```bash
+cd apps/api
+npm install joi
+```
+
+อัปเดต `apps/api/src/app.module.ts` ให้ validate `.env` ตอน boot:
+
+```ts
+import { Module } from '@nestjs/common';
+import { ConfigModule, ConfigService } from '@nestjs/config';
+import { MongooseModule } from '@nestjs/mongoose';
+import { Logger } from '@nestjs/common';
+import { Connection } from 'mongoose';
+import * as Joi from 'joi';
+import { AppController } from './app.controller';
+import { AppService } from './app.service';
+import { PostsModule } from './posts/posts.module';
+
+@Module({
+  imports: [
+    ConfigModule.forRoot({
+      isGlobal: true,
+      envFilePath: '../../.env',
+      validationSchema: Joi.object({
+        MONGODB_URI: Joi.string().uri().required(),
+        JWT_SECRET: Joi.string().min(10).required(),
+        API_PORT: Joi.number().port().default(4000),
+        WEB_ORIGIN: Joi.string().uri().required(),
+      }),
+      validationOptions: {
+        allowUnknown: true,
+        abortEarly: false,
+      },
+    }),
+    MongooseModule.forRootAsync({
+      inject: [ConfigService],
+      useFactory: (configService: ConfigService) => ({
+        uri: configService.getOrThrow<string>('MONGODB_URI'),
+        onConnectionCreate: (connection: Connection) => {
+          connection.on('connected', () =>
+            new Logger('MongooseModule').log('MongoDB connected'),
+          );
+          return connection;
+        },
+      }),
+    }),
+    PostsModule,
+  ],
+  controllers: [AppController],
+  providers: [AppService],
+})
+export class AppModule {}
+```
+
+- **`allowUnknown: true`** — จำเป็นตรงนี้เพราะ `.env` รากที่ [Repo layout](/devblog/th/setup/repo-layout/) สร้างไว้ถูกแชร์กันระหว่างสองแอป: `NEXT_PUBLIC_API_URL` เป็นของแอป Next.js ไม่ใช่ schema นี้ และ `allowUnknown: false` (default ของ Joi) จะทำให้ boot fail ทุกครั้งเพราะ variable ที่แอปนี้ไม่เคยอ่านเลย
+- **`abortEarly: false`** — รายงาน variable ที่ผิด/หายทั้งหมดในครั้งเดียว แทนที่จะหยุดตัวแรกแล้วบังคับให้ fix-rerun-fix วนไป
+- validate แค่สี่ variable ที่แอปนี้อ่านจริง (`MONGODB_URI`, `JWT_SECRET`, `API_PORT`, `WEB_ORIGIN`) — `JWT_SECRET` ยังไม่มีโค้ดไหนอ่านมันเลย แต่ validate ไว้ตั้งแต่ตอนนี้หมายความว่า [Authentication](/devblog/th/auth/) ไม่ต้องมาเพิ่ม env validation ทีหลัง
+
+สร้าง `apps/api/src/common/filters/all-exceptions.filter.ts`:
+
+```ts
+import {
+  ArgumentsHost,
+  Catch,
+  ExceptionFilter,
+  HttpException,
+  HttpStatus,
+  Logger,
+} from '@nestjs/common';
+import { HttpAdapterHost } from '@nestjs/core';
+
+@Catch()
+export class AllExceptionsFilter implements ExceptionFilter {
+  private readonly logger = new Logger(AllExceptionsFilter.name);
+
+  constructor(private readonly httpAdapterHost: HttpAdapterHost) {}
+
+  catch(exception: unknown, host: ArgumentsHost): void {
+    // Resolved here, not in the constructor: httpAdapter may not be
+    // set yet when the filter is instantiated.
+    const { httpAdapter } = this.httpAdapterHost;
+    const ctx = host.switchToHttp();
+    const request = ctx.getRequest();
+
+    const isHttpException = exception instanceof HttpException;
+    const status = isHttpException
+      ? exception.getStatus()
+      : HttpStatus.INTERNAL_SERVER_ERROR;
+    const message = isHttpException
+      ? exception.getResponse()
+      : 'Internal server error';
+
+    if (!isHttpException) {
+      this.logger.error(
+        exception instanceof Error ? exception.stack : exception,
+      );
+    } else if (status >= HttpStatus.INTERNAL_SERVER_ERROR) {
+      this.logger.error(exception.message, exception.stack);
+    }
+
+    const responseBody = {
+      statusCode: status,
+      timestamp: new Date().toISOString(),
+      path: httpAdapter.getRequestUrl(request),
+      message,
+    };
+
+    httpAdapter.reply(ctx.getResponse(), responseBody, status);
+  }
+}
+```
+
+- **`@Catch()`** แบบไม่มี argument จับทุกประเภท exception ไม่ใช่แค่ subclass ของ `HttpException`
+- **`exception.getResponse()`** คือสิ่งที่ `NotFoundException('Post not found')` ที่ throw ตั้งใจถืออยู่แล้ว — message นั้นปลอดภัยที่จะคืนตรง ๆ เพราะ developer เลือกที่จะใส่มันให้ client เห็น อะไรก็ตามที่ *ไม่ใช่* `HttpException` จะยุบเหลือ string คงที่ `'Internal server error'` — ผู้เรียกจะไม่มีทางเห็นว่า error จริงพูดว่าอะไร
+- **`this.logger.error(...)`** รันเฉพาะสอง path ที่สำคัญกับการ debug: error ที่ไม่ถูกจัดการจริง ๆ และ `HttpException` ที่ `500` ขึ้นไป (`4xx` อย่าง validation error ไม่ใช่ bug และไม่ต้อง log)
+
+ลงทะเบียนแบบ global ใน `apps/api/src/main.ts`:
+
+```ts
+import { NestFactory, HttpAdapterHost } from '@nestjs/core';
+import { ConfigService } from '@nestjs/config';
+import { AppModule } from './app.module';
+import { AllExceptionsFilter } from './common/filters/all-exceptions.filter';
+
+async function bootstrap() {
+  const app = await NestFactory.create(AppModule);
+  const configService = app.get(ConfigService);
+
+  app.enableCors({
+    origin: configService.getOrThrow<string>('WEB_ORIGIN'),
+    credentials: true,
+  });
+
+  const httpAdapterHost = app.get(HttpAdapterHost);
+  app.useGlobalFilters(new AllExceptionsFilter(httpAdapterHost));
+
+  app.enableShutdownHooks();
+
+  const port = configService.get<number>('API_PORT') ?? 4000;
+  await app.listen(port);
+  console.log(`API listening on http://localhost:${port}`);
+}
+bootstrap();
+```
+
+`useGlobalFilters` ต้องการ *instance* ไม่ใช่คลาส เพราะ constructor ของ `AllExceptionsFilter` รับ `HttpAdapterHost` — dependency ที่ filter ซึ่งไม่มี module ของตัวเองแบบนี้เอามาจาก Nest DI container เองไม่ได้ `main.ts` จึง resolve มันเองด้วย `app.get(HttpAdapterHost)` แล้วส่งเข้าไปด้วยมือ
+
+## Verify
+
+ทำให้ `.env` พังโดยตั้งใจเพื่อดู validation fail ดัง ๆ — comment `JWT_SECRET` ออก:
+
+```bash
+npm run start:dev
+```
+
+```txt
+Error: Config validation error: "JWT_SECRET" is required
+```
+
+คืน `.env` กลับมา แล้วลอง trigger exception filter ด้วย route ที่ไม่มีอยู่:
+
+```bash
+npm run start:dev
+curl -i localhost:4000/does-not-exist
+```
+
+```txt
+HTTP/1.1 404 Not Found
+{"statusCode":404,"timestamp":"...","path":"/does-not-exist","message":"Cannot GET /does-not-exist"}
+```
+
+`404` นั้นคือ routing exception ของ Nest เอง ซึ่งเป็น `HttpException` ที่ผ่าน `AllExceptionsFilter` มาโดย message ยังเหมือนเดิม — ยืนยันว่า filter ถูกเชื่อมเข้าไปโดยไม่เปลี่ยนพฤติกรรมของ exception ที่ปลอดภัยที่จะแสดงอยู่แล้ว
+
+## Recap
+
+`validationSchema` บน `ConfigModule.forRoot` เปลี่ยนค่า `.env` ที่หายไปหรือผิดรูปแบบให้เป็น error ดัง ๆ ตัวเดียวตอน boot แทนที่จะเป็น `undefined` เงียบ ๆ ที่โผล่มาทีหลัง; `allowUnknown: true` จำเป็นเพราะ `.env` ถูกแชร์กับแอป Next.js `AllExceptionsFilter` ดักทุก exception log ตัวที่ไม่คาดคิดด้วย `Logger` และคืน body ที่มีโครงสร้างเสมอ — message ที่ client เห็นได้จาก `HttpException.getResponse()` เมื่อ error ถูก throw ตั้งใจ, string คงที่ `'Internal server error'` ในกรณีอื่น มันทำงานบน path ของ HTTP เท่านั้น; [GraphQL API](/devblog/th/graphql-api/) ใช้กฎไม่รั่วเดียวกันกับ resolver ผ่าน `formatError` ของ Apollo เอง
+
+ถัดไป: [Validation →](/devblog/th/backend-foundations/validation/)

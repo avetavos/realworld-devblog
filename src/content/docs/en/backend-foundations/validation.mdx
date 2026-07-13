@@ -1,0 +1,235 @@
+---
+title: Validation
+description: "Enable the global ValidationPipe (whitelist, transform, forbidNonWhitelisted) and write a class-validator DTO, with a users endpoint to see all three options in effect."
+sidebar:
+  order: 4
+---
+
+## What we're building
+
+A global `ValidationPipe` in `main.ts`, with `whitelist`, `transform`, and `forbidNonWhitelisted` all enabled. Alongside it, the first `class-validator` DTO in the app — `apps/api/src/users/dto/create-user.dto.ts` — plus a minimal `UsersModule` (controller and service) whose only job is to give that DTO a real `POST` endpoint to validate against, so the pipe's behavior is something you can `curl` and see, not just read about.
+
+## Why
+
+`class-validator` decorators (`@IsEmail()`, `@MinLength(8)`) on a DTO class describe validation rules declaratively, next to the field they apply to — the same pattern `@Prop()` used for Mongoose schema fields in [Schemas](/devblog/en/data-modeling/schemas/). On their own, those decorators do nothing; something has to read the metadata they attach and actually run the checks. That's `ValidationPipe`, and registering it once with `useGlobalPipes` in `main.ts` means every controller in the app gets DTO validation for free — no controller method has to call anything explicitly, the same way every future controller gets `AllExceptionsFilter`'s error handling for free from [Config & exceptions](/devblog/en/backend-foundations/config-exceptions/) without adding a line to itself.
+
+Each option does one specific job:
+
+- **`whitelist: true`** — strips any property on the incoming body that isn't declared on the DTO class. A request with an extra `isAdmin: true` field silently loses that field before it reaches the controller method.
+- **`transform: true`** — converts the plain JSON object Express parses into an actual instance of the DTO class (`CreateUserDto`, not just an object shaped like one), and coerces primitive types (a query-string `"42"` becomes the number `42` if the DTO field is typed `number`). Without it, `@Body() dto: CreateUserDto` is a DTO-shaped object that fails `instanceof CreateUserDto` and hasn't had any type coercion applied.
+- **`forbidNonWhitelisted: true`** — the stricter sibling of `whitelist`. Instead of silently dropping an unknown `isAdmin: true`, the whole request is rejected with a `400` naming the unexpected property. `whitelist` alone is a cleanup step; `forbidNonWhitelisted` turns "you sent something we don't recognize" into a loud, visible error instead of a client silently believing a field it sent was accepted.
+
+## Pros & cons
+
+**Validating at the transport edge (DTO + global pipe) vs. validating inside the service/domain layer.** A global `ValidationPipe` rejects a malformed request before any handler code runs — no service method, no database query, no business logic executes on bad input, and every endpoint gets the same guarantee for free. The trade-off is that these rules live in `class-validator` decorators tied to the HTTP transport layer, not in the domain model itself: a `UsersService` method called from somewhere other than an HTTP request (a seed script, a queue consumer added later) gets none of this validation unless it also goes through a `ValidationPipe.transform()` call or its own explicit checks. For DevBlog, every write currently does go through either a REST controller or, from [GraphQL API](/devblog/en/graphql-api/) onward, a GraphQL resolver — both transport layers where this same edge-validation approach applies — so the gap stays theoretical for this course, but it's worth naming: edge validation protects entry points, not the domain layer itself.
+
+**Reuse in [GraphQL API](/devblog/en/graphql-api/).** `class-validator` decorators aren't REST-specific — the same `CreateUserDto` class below is written so that adding a single `@InputType()` decorator to the class (and `@Field()` to each property) is enough to reuse it as a GraphQL input type in Module 5, validated by the identical global `ValidationPipe`, which NestJS's GraphQL integration runs against resolver arguments the same way it runs against REST `@Body()`. Writing the DTO once, now, means Module 5 adds decorators to an existing class instead of writing a second, parallel validation definition.
+
+## Set it up
+
+Update `apps/api/src/main.ts` to enable the global pipe:
+
+```ts
+import { NestFactory, HttpAdapterHost } from '@nestjs/core';
+import { ConfigService } from '@nestjs/config';
+import { ValidationPipe } from '@nestjs/common';
+import { AppModule } from './app.module';
+import { AllExceptionsFilter } from './common/filters/all-exceptions.filter';
+
+async function bootstrap() {
+  const app = await NestFactory.create(AppModule);
+  const configService = app.get(ConfigService);
+
+  app.enableCors({
+    origin: configService.getOrThrow<string>('WEB_ORIGIN'),
+    credentials: true,
+  });
+
+  app.useGlobalPipes(
+    new ValidationPipe({
+      whitelist: true,
+      transform: true,
+      forbidNonWhitelisted: true,
+    }),
+  );
+
+  const httpAdapterHost = app.get(HttpAdapterHost);
+  app.useGlobalFilters(new AllExceptionsFilter(httpAdapterHost));
+
+  app.enableShutdownHooks();
+
+  const port = configService.get<number>('API_PORT') ?? 4000;
+  await app.listen(port);
+  console.log(`API listening on http://localhost:${port}`);
+}
+bootstrap();
+```
+
+Create `apps/api/src/users/dto/create-user.dto.ts`:
+
+```ts
+import { IsEmail, IsString, MinLength } from 'class-validator';
+
+export class CreateUserDto {
+  @IsEmail()
+  email: string;
+
+  @IsString()
+  @MinLength(8)
+  password: string;
+
+  @IsString()
+  @MinLength(2)
+  displayName: string;
+}
+```
+
+`password` is validated here, but hashing it with bcrypt before it ever reaches a database is [Authentication](/devblog/en/auth/)'s job, not this DTO's — this lesson only proves the shape and the pipe wiring.
+
+Create `apps/api/src/users/users.service.ts`. It has no persistence yet — that arrives with real user creation in [Authentication](/devblog/en/auth/) — so it just echoes back the validated, transformed DTO to make the pipe's effect visible:
+
+```ts
+import { Injectable } from '@nestjs/common';
+import { CreateUserDto } from './dto/create-user.dto';
+
+@Injectable()
+export class UsersService {
+  create(dto: CreateUserDto): CreateUserDto {
+    return dto;
+  }
+}
+```
+
+Create `apps/api/src/users/users.controller.ts`:
+
+```ts
+import { Body, Controller, Post } from '@nestjs/common';
+import { UsersService } from './users.service';
+import { CreateUserDto } from './dto/create-user.dto';
+
+@Controller('users')
+export class UsersController {
+  constructor(private readonly usersService: UsersService) {}
+
+  @Post()
+  create(@Body() dto: CreateUserDto): CreateUserDto {
+    return this.usersService.create(dto);
+  }
+}
+```
+
+Create `apps/api/src/users/users.module.ts`:
+
+```ts
+import { Module } from '@nestjs/common';
+import { UsersController } from './users.controller';
+import { UsersService } from './users.service';
+
+@Module({
+  controllers: [UsersController],
+  providers: [UsersService],
+})
+export class UsersModule {}
+```
+
+Register `UsersModule` in `apps/api/src/app.module.ts`, alongside `PostsModule`:
+
+```ts
+import { Module } from '@nestjs/common';
+import { ConfigModule, ConfigService } from '@nestjs/config';
+import { MongooseModule } from '@nestjs/mongoose';
+import { Logger } from '@nestjs/common';
+import { Connection } from 'mongoose';
+import * as Joi from 'joi';
+import { AppController } from './app.controller';
+import { AppService } from './app.service';
+import { PostsModule } from './posts/posts.module';
+import { UsersModule } from './users/users.module';
+
+@Module({
+  imports: [
+    ConfigModule.forRoot({
+      isGlobal: true,
+      envFilePath: '../../.env',
+      validationSchema: Joi.object({
+        MONGODB_URI: Joi.string().uri().required(),
+        JWT_SECRET: Joi.string().min(10).required(),
+        API_PORT: Joi.number().port().default(4000),
+        WEB_ORIGIN: Joi.string().uri().required(),
+      }),
+      validationOptions: {
+        allowUnknown: true,
+        abortEarly: false,
+      },
+    }),
+    MongooseModule.forRootAsync({
+      inject: [ConfigService],
+      useFactory: (configService: ConfigService) => ({
+        uri: configService.getOrThrow<string>('MONGODB_URI'),
+        onConnectionCreate: (connection: Connection) => {
+          connection.on('connected', () =>
+            new Logger('MongooseModule').log('MongoDB connected'),
+          );
+          return connection;
+        },
+      }),
+    }),
+    PostsModule,
+    UsersModule,
+  ],
+  controllers: [AppController],
+  providers: [AppService],
+})
+export class AppModule {}
+```
+
+## Verify
+
+```bash
+npm run start:dev
+```
+
+A valid request round-trips, with `transform` producing a real `CreateUserDto` instance:
+
+```bash
+curl -i -X POST localhost:4000/users \
+  -H "Content-Type: application/json" \
+  -d '{"email":"author@example.com","password":"correct-horse","displayName":"Ava"}'
+```
+
+```txt
+HTTP/1.1 201 Created
+{"email":"author@example.com","password":"correct-horse","displayName":"Ava"}
+```
+
+An unrecognized field is rejected outright by `forbidNonWhitelisted`, instead of silently dropped:
+
+```bash
+curl -i -X POST localhost:4000/users \
+  -H "Content-Type: application/json" \
+  -d '{"email":"author@example.com","password":"correct-horse","displayName":"Ava","isAdmin":true}'
+```
+
+```txt
+HTTP/1.1 400 Bad Request
+{"statusCode":400,"timestamp":"...","path":"/users","message":["property isAdmin should not exist"]}
+```
+
+An invalid field is caught by `class-validator`, and the message array comes from `AllExceptionsFilter` passing `exception.getResponse()` through unchanged:
+
+```bash
+curl -i -X POST localhost:4000/users \
+  -H "Content-Type: application/json" \
+  -d '{"email":"not-an-email","password":"short","displayName":"Ava"}'
+```
+
+```txt
+HTTP/1.1 400 Bad Request
+{"statusCode":400,"timestamp":"...","path":"/users","message":["email must be an email","password must be longer than or equal to 8 characters"]}
+```
+
+## Recap
+
+`ValidationPipe({ whitelist: true, transform: true, forbidNonWhitelisted: true })`, registered once globally, gives every controller in the app DTO validation, unknown-property rejection, and real class instances in `@Body()` without any per-route code. `CreateUserDto`'s `class-validator` decorators are the declarative source of truth for those rules — and are written so [GraphQL API](/devblog/en/graphql-api/) can reuse the same class as a GraphQL input type with one added decorator, validated by this same global pipe. `UsersModule` here is intentionally thin (no persistence yet) — it exists to make the pipe's three options each individually visible over `curl`, and [Authentication](/devblog/en/auth/) builds the real user creation on top of it.
+
+Next: [Authentication →](/devblog/en/auth/)

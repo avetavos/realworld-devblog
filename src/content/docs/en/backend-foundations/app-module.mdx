@@ -1,0 +1,137 @@
+---
+title: The app module
+description: "Wire main.ts and app.module.ts — CORS, shutdown hooks, and a health-check AppController — and see why NestJS modules and dependency injection are the composition pattern the rest of the course depends on."
+sidebar:
+  order: 1
+---
+
+## What we're building
+
+Two files, both already scaffolded by [Backend init](/devblog/en/setup/backend-init/): `apps/api/src/main.ts` and `apps/api/src/app.module.ts`. This lesson replaces the default `Hello World!` controller with a real `GET /health` endpoint, and adds two production-relevant calls to bootstrap — `enableCors` and `enableShutdownHooks`. Every later module in this course adds to these same two files rather than replacing them.
+
+## Why
+
+A NestJS **module** is a class annotated with `@Module()` that declares three things: which providers it owns (`providers`), which controllers it exposes (`controllers`), and which other modules it needs (`imports`). `AppModule` is the root of that graph — every feature module the rest of this course builds (`PostsModule`, `UsersModule`, and later `TagsModule`, `CommentsModule`) gets added to its `imports` array, the same way `ConfigModule` was added in [Backend init](/devblog/en/setup/backend-init/).
+
+This is the **composition** half of the module system: instead of one file wiring up every controller and service by hand, each module composes a self-contained slice of the app, and `AppModule` composes those modules together. The other half is **dependency injection**. `AppController` doesn't construct an `AppService` itself with `new AppService()` — it declares a constructor parameter typed `AppService`, and Nest's IoC container looks up (or creates) the single shared instance and passes it in:
+
+```ts
+constructor(private readonly appService: AppService) {}
+```
+
+This is the classic Dependency Injection / Inversion of Control pattern: the controller depends on an abstraction (here, just the `AppService` class, since Nest doesn't require interfaces for simple cases) rather than a concrete construction step, and something external — the container — supplies the instance. The payoff shows up immediately in testing (a test module can swap in a fake `AppService` without touching `AppController`'s code) and again later in this course, when [Authentication](/devblog/en/auth/) swaps a real `UsersService` into a `JwtStrategy` the exact same way.
+
+`ConfigModule.forRoot({ isGlobal: true, ... })` from [Backend init](/devblog/en/setup/backend-init/) is why `main.ts` below can call `app.get(ConfigService)` without `AppModule` ever importing `ConfigModule` into a feature module's `imports` array — a global module registers its exports on the root container, reachable from anywhere.
+
+## Pros & cons
+
+**DI container vs. manual wiring.** Hand-instantiating `new AppService()` inside `AppController`'s constructor would work for a class this small, and it avoids the "how does this actually get built?" indirection newcomers to Nest run into. It stops working the moment `AppService` itself needs a dependency (a `ConfigService`, a Mongoose model) — every caller of `new AppService()` would need to know how to build that dependency too, and the object graph fans out fast. The container builds the whole graph once, as singletons by default, and every class only has to declare what it needs, not how to build it.
+
+**`enableCors({ origin: WEB_ORIGIN, credentials: true })` vs. `enableCors()`.** A bare `enableCors()` reflects any origin, which is fine for a local demo but not what a browser will even allow once cookies or `Authorization` headers are involved: the CORS spec forbids `credentials: true` from pairing with a wildcard origin, so an explicit, single origin isn't just tighter security — it's required the moment [Authentication](/devblog/en/auth/) starts sending credentialed requests from the Next.js app. The cost is one more environment variable (`WEB_ORIGIN`, already in `.env.example` from [Repo layout](/devblog/en/setup/repo-layout/)) to keep in sync between the two apps.
+
+## Set it up
+
+Update `apps/api/src/main.ts` to enable CORS and shutdown hooks alongside the existing `ConfigService`-driven port:
+
+```ts
+import { NestFactory } from '@nestjs/core';
+import { ConfigService } from '@nestjs/config';
+import { AppModule } from './app.module';
+
+async function bootstrap() {
+  const app = await NestFactory.create(AppModule);
+  const configService = app.get(ConfigService);
+
+  app.enableCors({
+    origin: configService.getOrThrow<string>('WEB_ORIGIN'),
+    credentials: true,
+  });
+
+  app.enableShutdownHooks();
+
+  const port = configService.get<number>('API_PORT') ?? 4000;
+  await app.listen(port);
+  console.log(`API listening on http://localhost:${port}`);
+}
+bootstrap();
+```
+
+- **`enableCors`** — restricts browser requests to the one origin the Next.js app runs on (`WEB_ORIGIN`), with `credentials: true` so cookies/`Authorization` headers can cross that origin once auth exists.
+- **`enableShutdownHooks`** — without this call, `onModuleDestroy`/`onApplicationShutdown` lifecycle hooks never fire on `SIGTERM`. It costs a small amount of listener overhead and is off by default for that reason, but it's what lets a later module close a Mongoose connection or flush a queue cleanly instead of being killed mid-write when a container orchestrator sends `SIGTERM`.
+
+Replace the scaffolded `AppController`/`AppService` pair. Update `apps/api/src/app.controller.ts`:
+
+```ts
+import { Controller, Get } from '@nestjs/common';
+import { AppService } from './app.service';
+
+@Controller()
+export class AppController {
+  constructor(private readonly appService: AppService) {}
+
+  @Get('health')
+  getHealth(): { status: string } {
+    return this.appService.getHealth();
+  }
+}
+```
+
+Update `apps/api/src/app.service.ts`:
+
+```ts
+import { Injectable } from '@nestjs/common';
+
+@Injectable()
+export class AppService {
+  getHealth(): { status: string } {
+    return { status: 'ok' };
+  }
+}
+```
+
+`app.module.ts` doesn't need any changes yet — `AppController` and `AppService` are already wired into it from [Backend init](/devblog/en/setup/backend-init/):
+
+```ts
+import { Module } from '@nestjs/common';
+import { ConfigModule } from '@nestjs/config';
+import { AppController } from './app.controller';
+import { AppService } from './app.service';
+
+@Module({
+  imports: [
+    ConfigModule.forRoot({
+      isGlobal: true,
+      envFilePath: '../../.env',
+    }),
+  ],
+  controllers: [AppController],
+  providers: [AppService],
+})
+export class AppModule {}
+```
+
+## Verify
+
+```bash
+npm run start:dev
+```
+
+```txt
+[Nest] ... LOG [NestApplication] Nest application successfully started
+API listening on http://localhost:4000
+```
+
+In another terminal:
+
+```bash
+curl localhost:4000/health
+# {"status":"ok"}
+```
+
+`AppController` returning `{"status":"ok"}` confirms the DI graph resolved — `AppController` got a real `AppService` instance without either of them being wired up by hand — and that `enableCors`/`enableShutdownHooks` didn't break startup. There's no browser request here to see CORS reject a bad origin yet; that becomes visible once [Frontend Foundations](/devblog/en/frontend-foundations/) makes real requests from the Next.js app.
+
+## Recap
+
+`AppModule` composes providers, controllers, and (eventually) feature modules into one graph; Nest's IoC container resolves that graph and injects each class's declared dependencies instead of classes constructing each other by hand. `main.ts` now enables CORS scoped to `WEB_ORIGIN` with credentials, and shutdown hooks so lifecycle cleanup runs on `SIGTERM`. `GET /health` replaces the scaffolded `Hello World!` and is the first real endpoint in the API — every later module either extends it or adds alongside it.
+
+Next: [Mongoose connection →](/devblog/en/backend-foundations/mongoose-connection/)
