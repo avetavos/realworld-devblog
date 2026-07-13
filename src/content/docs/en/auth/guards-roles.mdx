@@ -1,0 +1,123 @@
+---
+title: Guards & roles
+description: "Write GqlAuthGuard to pull the request out of GraphQL's execution context, RolesGuard plus a Reflector-backed @Roles decorator for author vs. admin, and a @CurrentUser param decorator."
+sidebar:
+  order: 3
+---
+
+## What we're building
+
+Four small files in `apps/api/src/auth/`: `gql-auth.guard.ts` (`GqlAuthGuard`, a thin adapter over `passport-jwt`'s `AuthGuard('jwt')` for GraphQL), `roles.decorator.ts` (`@Roles(...roles)`), `roles.guard.ts` (`RolesGuard`, which reads what `@Roles` declared), and `current-user.decorator.ts` (`@CurrentUser()`, a param decorator). None of these have a call site yet — [Auth resolver & GraphQL setup](/devblog/en/auth/auth-resolver/) is where `me` and future admin-only mutations actually apply them.
+
+## Why
+
+A NestJS **guard** is a class with a `canActivate(context): boolean` method that runs before a route handler (or resolver method) executes. Return `true` and the request proceeds; return `false` (or throw) and it's rejected before any business logic runs — the same "reject at the edge" principle [Validation](/devblog/en/backend-foundations/validation/)'s `ValidationPipe` applies to malformed bodies, applied here to unauthenticated or under-privileged requests instead.
+
+`AuthGuard('jwt')` from `@nestjs/passport` already implements `canActivate` for REST — it looks up the `'jwt'` strategy [JWT & Passport](/devblog/en/auth/jwt-passport/) registered, runs `JwtStrategy.validate`, and attaches the result to `req.user`. The only thing it doesn't know how to do is find `req` inside a GraphQL resolver's arguments, because a resolver's `canActivate` receives a `GraphQLExecutionContext`-shaped object, not Express's `(req, res)` pair directly. `GqlAuthGuard` overrides exactly one method, `getRequest`, to bridge that gap: `GqlExecutionContext.create(context)` wraps the raw context in a GraphQL-aware helper, and `.getContext().req` pulls out the same `req` object `context: ({ req }) => ({ req })` in [Auth resolver & GraphQL setup](/devblog/en/auth/auth-resolver/)'s `GraphQLModule.forRoot` puts there for every resolver call. Everything else — running the strategy, setting `req.user` — is inherited unchanged from `AuthGuard('jwt')`.
+
+`RolesGuard` is a second, separate guard for a second, separate question. `GqlAuthGuard` answers "is this a real, signed-in user?"; `RolesGuard` answers "does this signed-in user have the right role?" — and it needs to know, per resolver method, what "the right role" even means. That's what `@Roles('admin')` is for: `SetMetadata(ROLES_KEY, roles)` attaches an array of allowed roles as metadata on the decorated method, readable later by anything holding a `Reflector`. `RolesGuard.canActivate` calls `this.reflector.getAllAndOverride<Role[]>(ROLES_KEY, [context.getHandler(), context.getClass()])` — checking the method first, falling back to the class — to read that metadata back, and if none was set (`@Roles` wasn't used on this method), it returns `true`: no roles required means no restriction. This is the same declarative pattern as `class-validator` decorators driving `ValidationPipe` — the metadata is inert until something reads it, and the guard is the thing that reads it.
+
+Applying both guards together, `@UseGuards(GqlAuthGuard, RolesGuard)`, matters in that exact order: guards run left to right, and `RolesGuard` reads `req.user`, which only exists once `GqlAuthGuard` has already run the JWT strategy and attached it. Swap the order and `RolesGuard` reads `undefined`.
+
+`@CurrentUser()` is unrelated to authorization — it's a convenience `createParamDecorator` that does the same `GqlExecutionContext.create(context).getContext().req.user` lookup `RolesGuard` does internally, but exposes it as a resolver method parameter instead of a guard-side check, so a resolver can read *who* is calling without re-deriving it from the raw context.
+
+## Pros & cons
+
+**Declarative `@Roles()` + `RolesGuard` vs. an inline check in every resolver.** `if (user.role !== 'admin') { throw new ForbiddenException(); }` written directly in a resolver method works, costs zero indirection, and is easy to read in isolation. It doesn't scale: the same three lines get copy-pasted into every admin-only mutation, a typo (`!==` vs `===`) in just one of them is a real access-control bug that's easy to miss in review, and there is no single place to audit "which operations require which role" — that answer is scattered across every resolver file. `@Roles('admin')` + `RolesGuard` centralizes the check into one class, written once, and turns "what does this operation require" into something visible at the top of the method, next to `@Mutation()`/`@Query()`, instead of buried in its body.
+
+**Two separate guards (`GqlAuthGuard`, `RolesGuard`) vs. one combined guard.** A single guard that both verifies the JWT and checks the role would save one entry in every `@UseGuards()` call — but it would conflate two independent questions ("is this a valid session" and "is this session allowed here") into one class, making it impossible to reuse just the authentication half for routes that need *any* signed-in user regardless of role (`me`, below, is exactly that case: `@UseGuards(GqlAuthGuard)` alone, no `RolesGuard`, no `@Roles()`). Keeping them separate costs one extra guard in the array for role-restricted operations, in exchange for authentication and authorization staying independently composable.
+
+## Set it up
+
+Create `apps/api/src/auth/gql-auth.guard.ts`:
+
+```ts
+import { ExecutionContext, Injectable } from '@nestjs/common';
+import { AuthGuard } from '@nestjs/passport';
+import { GqlExecutionContext } from '@nestjs/graphql';
+
+@Injectable()
+export class GqlAuthGuard extends AuthGuard('jwt') {
+  getRequest(context: ExecutionContext) {
+    const ctx = GqlExecutionContext.create(context);
+    return ctx.getContext().req;
+  }
+}
+```
+
+Create `apps/api/src/auth/roles.decorator.ts`:
+
+```ts
+import { SetMetadata } from '@nestjs/common';
+
+export type Role = 'author' | 'admin';
+export const ROLES_KEY = 'roles';
+export const Roles = (...roles: Role[]) => SetMetadata(ROLES_KEY, roles);
+```
+
+Create `apps/api/src/auth/roles.guard.ts`:
+
+```ts
+import { CanActivate, ExecutionContext, Injectable } from '@nestjs/common';
+import { Reflector } from '@nestjs/core';
+import { GqlExecutionContext } from '@nestjs/graphql';
+import { ROLES_KEY, Role } from './roles.decorator';
+
+@Injectable()
+export class RolesGuard implements CanActivate {
+  constructor(private readonly reflector: Reflector) {}
+
+  canActivate(context: ExecutionContext): boolean {
+    const requiredRoles = this.reflector.getAllAndOverride<Role[]>(
+      ROLES_KEY,
+      [context.getHandler(), context.getClass()],
+    );
+    if (!requiredRoles) {
+      return true;
+    }
+
+    const ctx = GqlExecutionContext.create(context);
+    const { user } = ctx.getContext().req;
+    return requiredRoles.includes(user?.role);
+  }
+}
+```
+
+Create `apps/api/src/auth/current-user.decorator.ts`:
+
+```ts
+import { createParamDecorator, ExecutionContext } from '@nestjs/common';
+import { GqlExecutionContext } from '@nestjs/graphql';
+
+export const CurrentUser = createParamDecorator(
+  (data: unknown, context: ExecutionContext) => {
+    const ctx = GqlExecutionContext.create(context);
+    return ctx.getContext().req.user;
+  },
+);
+```
+
+- **`Role = 'author' | 'admin'`** in `roles.decorator.ts` mirrors the `User.role` union from [Schemas](/devblog/en/data-modeling/schemas/) exactly — `@Roles('admin')` only type-checks against a value that's actually a possible role.
+- **`getAllAndOverride`** (rather than `get`) checks method-level metadata first, then falls back to class-level metadata if the method itself has none — useful later if an entire resolver class is ever marked admin-only in one place instead of decorating every method.
+- **`user?.role`** — the optional chaining matters because `RolesGuard` can, in principle, run without `GqlAuthGuard` ahead of it (a resolver author forgets to add it); `user` would be `undefined` on `req`, and `undefined?.role` is `undefined`, which safely fails `requiredRoles.includes(...)` rather than throwing a `TypeError` that would surface as an opaque `500` instead of the intended `403`.
+
+None of these four files are registered as providers in `AuthModule` — Nest instantiates classes passed directly to `@UseGuards()` through the same DI container, and `Reflector` is a globally available core provider, so `RolesGuard`'s constructor dependency resolves without any extra wiring.
+
+## Verify
+
+```bash
+npm run start:dev
+```
+
+```txt
+[Nest] ... LOG [NestApplication] Nest application successfully started
+API listening on http://localhost:4000
+```
+
+A clean boot confirms all four files compile and their imports (`@nestjs/passport`'s `AuthGuard`, `@nestjs/graphql`'s `GqlExecutionContext`, `@nestjs/core`'s `Reflector`) resolve correctly. None of them have a call site yet, so there's nothing to `curl` — [Auth resolver & GraphQL setup](/devblog/en/auth/auth-resolver/) decorates `me` with `@UseGuards(GqlAuthGuard)` and reads `@CurrentUser()`, which is where a request actually exercises this lesson's guards end to end.
+
+## Recap
+
+`GqlAuthGuard` adapts `passport-jwt`'s REST-oriented `AuthGuard('jwt')` to GraphQL by overriding one method, `getRequest`, to pull the shared `req` object out of `GqlExecutionContext` instead of Express's request/response pair. `@Roles(...roles)` attaches metadata with `SetMetadata`; `RolesGuard` reads it back with `Reflector.getAllAndOverride` and compares it against `req.user.role`, returning `true` (unrestricted) whenever a method carries no `@Roles()` at all. `@CurrentUser()` is a plain param decorator doing the same context lookup, exposed for resolver methods to read who's calling. All four are inert until [Auth resolver & GraphQL setup](/devblog/en/auth/auth-resolver/) applies them to real `@Query()`/`@Mutation()` methods.
+
+Next: [Auth resolver & GraphQL setup →](/devblog/en/auth/auth-resolver/)

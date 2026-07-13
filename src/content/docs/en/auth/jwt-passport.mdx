@@ -1,0 +1,223 @@
+---
+title: JWT & Passport
+description: "Wire JwtModule.registerAsync and a passport-jwt Strategy, add AuthService.validateUser and issueToken, and see what's actually inside a signed JWT."
+sidebar:
+  order: 2
+---
+
+## What we're building
+
+`apps/api/src/auth/auth.module.ts`, `auth.service.ts`, and `jwt.strategy.ts` — the first files in a new `AuthModule`. `JwtModule.registerAsync` reads `JWT_SECRET` through `ConfigService`, the same `getOrThrow` pattern [Mongoose connection](/devblog/en/backend-foundations/mongoose-connection/) used for `MONGODB_URI`. `AuthService.validateUser` checks a candidate password with `bcrypt.compare` against the hash [Password hashing](/devblog/en/auth/passwords/) created, and `issueToken` signs a JWT carrying the payload the rest of this module trusts. `JwtStrategy` is the `passport-jwt` piece that later turns an incoming `Authorization: Bearer <token>` header back into a verified payload.
+
+## Why
+
+A JWT (JSON Web Token) is three base64url-encoded segments joined by dots: `header.payload.signature`. The header names the signing algorithm; the payload is arbitrary claims — here, `{ sub: user.id, email, role }`; the signature is an HMAC of the first two segments computed with `JWT_SECRET`, which is what makes the token tamper-evident. Anyone can base64-decode a JWT's payload and read it (it is **not** encrypted — never put a password or anything else secret in the payload), but only someone holding `JWT_SECRET` can produce a signature `jwtService.verify` will accept. Change one character of the payload after the fact and the signature no longer matches.
+
+`sub` is JWT's registered claim name for "subject" — the entity the token is about — which is why `issueToken` uses `sub: user.id` rather than a custom field name; any JWT-aware tool that inspects the token recognizes it. `email` and `role` ride alongside it because [Guards & roles](/devblog/en/auth/guards-roles/)'s `RolesGuard` needs the role on every request without a database round trip to fetch it.
+
+This is a **stateless** session model: the server never stores "this token is currently valid" anywhere. `JwtStrategy.validate` runs entirely off the cryptographic signature and the `exp` claim `signOptions: { expiresIn: '7d' }` adds automatically — no session table, no Redis lookup, no database hit on every authenticated request. That statelessness is also JWT's sharpest trade-off, covered below.
+
+`JwtModule.registerAsync` instead of `JwtModule.register` exists for the same reason `MongooseModule.forRootAsync` does: `JWT_SECRET` has to come from `ConfigService`, which doesn't exist until Nest's DI container is built, so a `useFactory` defers reading it until `inject: [ConfigService]` resolves.
+
+## Pros & cons
+
+**Stateless JWT vs. a server-side session store.** A session store (a `sessions` table, or Redis) can revoke access instantly — delete the row, the user is logged out everywhere, immediately. It costs a database or cache round trip on every authenticated request, and that store becomes another piece of infrastructure to run and scale. A stateless JWT is the mirror image: zero storage, zero lookup cost, and it trivially works across multiple API instances behind a load balancer with no shared session state to synchronize — but there's no way to invalidate one before its `exp` claim naturally expires. This course accepts that trade-off with a `7d` expiry, appropriate for a small admin/author tool; a system that needs instant revocation (banning a user, a compromised token) needs either a short expiry paired with refresh tokens, or a hybrid — a server-side denylist checked only for revocation, not for every claim.
+
+**`sub`/`email`/`role` in the payload vs. `sub` only.** Packing `email` and `role` into the token means `JwtStrategy.validate` and `RolesGuard` never need a database call to authorize a request — the trade-off is that both fields are frozen at the moment the token was issued. If an admin's role changes mid-day, every token they already hold still claims the old role until it expires and they log in again. For a `7d` expiry and infrequent role changes, that staleness window is an acceptable, explicit trade-off; a system with more volatile roles would keep the payload down to `sub` alone and re-fetch the user (and their current role) on every request instead.
+
+## Set it up
+
+Create `apps/api/src/auth/jwt.strategy.ts`:
+
+```ts
+import { Injectable } from '@nestjs/common';
+import { PassportStrategy } from '@nestjs/passport';
+import { ConfigService } from '@nestjs/config';
+import { ExtractJwt, Strategy } from 'passport-jwt';
+
+export interface JwtPayload {
+  sub: string;
+  email: string;
+  role: 'author' | 'admin';
+}
+
+@Injectable()
+export class JwtStrategy extends PassportStrategy(Strategy) {
+  constructor(configService: ConfigService) {
+    super({
+      jwtFromRequest: ExtractJwt.fromAuthHeaderAsBearerToken(),
+      ignoreExpiration: false,
+      secretOrKey: configService.getOrThrow<string>('JWT_SECRET'),
+    });
+  }
+
+  validate(payload: JwtPayload) {
+    return { userId: payload.sub, email: payload.email, role: payload.role };
+  }
+}
+```
+
+- **`ExtractJwt.fromAuthHeaderAsBearerToken()`** — reads the token from `Authorization: Bearer <token>`, the standard header passport-jwt (and every HTTP client library) expects.
+- **`ignoreExpiration: false`** — an expired token fails verification outright, matching the `7d` `expiresIn` set below. This is passport-jwt's own default; it's spelled out here so the expiry check is visible in the code, not just implied.
+- **`validate`** runs only after the signature and expiry both check out. Its return value becomes `req.user` — reshaped here to `userId`/`email`/`role` since that's the exact shape [Guards & roles](/devblog/en/auth/guards-roles/)'s `@CurrentUser()` decorator and `RolesGuard` read from it.
+
+Create `apps/api/src/auth/auth.service.ts`:
+
+```ts
+import { Injectable } from '@nestjs/common';
+import { JwtService } from '@nestjs/jwt';
+import * as bcrypt from 'bcrypt';
+import { UsersService } from '../users/users.service';
+import { UserDocument } from '../users/schemas/user.schema';
+
+@Injectable()
+export class AuthService {
+  constructor(
+    private readonly usersService: UsersService,
+    private readonly jwtService: JwtService,
+  ) {}
+
+  async validateUser(
+    email: string,
+    password: string,
+  ): Promise<UserDocument | null> {
+    const user = await this.usersService.findByEmail(email);
+    if (!user) {
+      return null;
+    }
+
+    const passwordMatches = await bcrypt.compare(password, user.passwordHash);
+    return passwordMatches ? user : null;
+  }
+
+  issueToken(user: UserDocument): string {
+    const payload = { sub: user.id, email: user.email, role: user.role };
+    return this.jwtService.sign(payload);
+  }
+}
+```
+
+- **`bcrypt.compare(password, user.passwordHash)`** re-derives the hash of the candidate password using the salt already embedded in `passwordHash`, and compares in constant time — it never has to (and can't) reverse `passwordHash` back to the original password.
+- **`validateUser` returning `null`** on either "no such user" or "wrong password" is deliberate: a login endpoint that distinguishes the two in its response tells an attacker which emails are registered. [Auth resolver & GraphQL setup](/devblog/en/auth/auth-resolver/)'s `login` mutation turns this single `null` into one generic `UnauthorizedException`.
+
+Create `apps/api/src/auth/auth.module.ts`:
+
+```ts
+import { Module } from '@nestjs/common';
+import { ConfigService } from '@nestjs/config';
+import { JwtModule } from '@nestjs/jwt';
+import { PassportModule } from '@nestjs/passport';
+import { UsersModule } from '../users/users.module';
+import { AuthService } from './auth.service';
+import { JwtStrategy } from './jwt.strategy';
+
+@Module({
+  imports: [
+    UsersModule,
+    PassportModule,
+    JwtModule.registerAsync({
+      inject: [ConfigService],
+      useFactory: (configService: ConfigService) => ({
+        secret: configService.getOrThrow<string>('JWT_SECRET'),
+        signOptions: { expiresIn: '7d' },
+      }),
+    }),
+  ],
+  providers: [AuthService, JwtStrategy],
+  exports: [AuthService],
+})
+export class AuthModule {}
+```
+
+Register `AuthModule` in `apps/api/src/app.module.ts`, alongside `UsersModule`:
+
+```ts
+import { Module } from '@nestjs/common';
+// ...existing imports
+import { AuthModule } from './auth/auth.module';
+
+@Module({
+  imports: [
+    // ...existing imports (ConfigModule, MongooseModule, PostsModule, UsersModule)
+    AuthModule,
+  ],
+  controllers: [AppController],
+  providers: [AppService],
+})
+export class AppModule {}
+```
+
+There's no HTTP or GraphQL entry point into `AuthService` yet — that's [Auth resolver & GraphQL setup](/devblog/en/auth/auth-resolver/)'s job. To make the `JwtModule` wiring itself visible in the boot log the same way [Mongoose connection](/devblog/en/backend-foundations/mongoose-connection/)'s `PostsService` proved `forFeature` worked, add a temporary smoke check:
+
+```ts
+import { Injectable, Logger, OnModuleInit } from '@nestjs/common';
+import { JwtService } from '@nestjs/jwt';
+import * as bcrypt from 'bcrypt';
+import { UsersService } from '../users/users.service';
+import { UserDocument } from '../users/schemas/user.schema';
+
+@Injectable()
+export class AuthService implements OnModuleInit {
+  private readonly logger = new Logger(AuthService.name);
+
+  constructor(
+    private readonly usersService: UsersService,
+    private readonly jwtService: JwtService,
+  ) {}
+
+  onModuleInit(): void {
+    const demoPayload = {
+      sub: 'demo-user-id',
+      email: 'demo@example.com',
+      role: 'author' as const,
+    };
+    const token = this.jwtService.sign(demoPayload);
+    const decoded = this.jwtService.verify(token);
+    this.logger.log(`Signed JWT: ${token}`);
+    this.logger.log(`Verified payload: ${JSON.stringify(decoded)}`);
+  }
+
+  async validateUser(
+    email: string,
+    password: string,
+  ): Promise<UserDocument | null> {
+    const user = await this.usersService.findByEmail(email);
+    if (!user) {
+      return null;
+    }
+
+    const passwordMatches = await bcrypt.compare(password, user.passwordHash);
+    return passwordMatches ? user : null;
+  }
+
+  issueToken(user: UserDocument): string {
+    const payload = { sub: user.id, email: user.email, role: user.role };
+    return this.jwtService.sign(payload);
+  }
+}
+```
+
+`onModuleInit` here is a throwaway wiring check, not real auth logic — it exists to prove `JwtModule.registerAsync` read `JWT_SECRET` correctly and that sign/verify round-trip, without needing a real registered user yet. `validateUser` and `issueToken` get their real exercise once [Auth resolver & GraphQL setup](/devblog/en/auth/auth-resolver/) calls them from `register` and `login` mutations.
+
+## Verify
+
+```bash
+npm run start:dev
+```
+
+```txt
+[Nest] ... LOG [AuthService] Signed JWT: eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiJkZW1vLXVzZXItaWQiLCJlbWFpbCI6ImRlbW9AZXhhbXBsZS5jb20iLCJyb2xlIjoiYXV0aG9yIiwiaWF0IjoxNzUyMzQ1Njc4LCJleHAiOjE3NTI5NTA0Nzh9.xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
+[Nest] ... LOG [AuthService] Verified payload: {"sub":"demo-user-id","email":"demo@example.com","role":"author","iat":1752345678,"exp":1752950478}
+```
+
+Three dot-separated segments confirm the JWT's structure; `iat`/`exp` confirm `signOptions: { expiresIn: '7d' }` took effect (`exp` minus `iat` is exactly `7 * 24 * 60 * 60` seconds). A missing or too-short `JWT_SECRET` fails loudly instead, the same fail-fast guarantee [Config & exceptions](/devblog/en/backend-foundations/config-exceptions/)'s Joi schema already gives every other required variable:
+
+```txt
+Error: Config validation error: "JWT_SECRET" is required
+```
+
+## Recap
+
+`JwtStrategy` extracts and verifies a Bearer token using `passport-jwt`, resolving `JWT_SECRET` through `ConfigService` the same fail-fast way every other config value in this app is read. `AuthService.validateUser` checks a password with `bcrypt.compare` against the hash [Password hashing](/devblog/en/auth/passwords/) created and returns `null` on any failure, deliberately not distinguishing "wrong password" from "no such user." `issueToken` signs a `{ sub, email, role }` payload with a `7d` expiry — a stateless design that scales without a session store but can't be revoked before it expires. The temporary `onModuleInit` smoke check proves the sign/verify round trip works; [Guards & roles](/devblog/en/auth/guards-roles/) is what actually stops an unauthenticated or under-privileged request next.
+
+Next: [Guards & roles →](/devblog/en/auth/guards-roles/)

@@ -1,0 +1,376 @@
+---
+title: Auth resolver และการตั้งค่า GraphQL
+description: "Bootstrap GraphQLModule.forRoot แบบ code-first เพิ่ม object type User และ AuthPayload แล้วเขียน register, login และ me ของ AuthResolver — resolver ตัวแรกในแอป"
+sidebar:
+  order: 4
+---
+
+## What we're building
+
+`GraphQLModule.forRoot<ApolloDriverConfig>` ใน `app.module.ts` — การเดินสาย GraphQL ครั้งแรกใน DevBlog ควบคู่กันคือ `apps/api/src/users/models/user.model.ts` (GraphQL type `User` แบบ code-first ที่ตั้งใจแยกออกจาก schema class `User` ของ Mongoose), `apps/api/src/auth/models/auth-payload.model.ts` (`AuthPayload`), DTO แบบ `@InputType` สองตัว (`RegisterInput`, `LoginInput`) และ `apps/api/src/auth/auth.resolver.ts` — `AuthResolver` resolver ตัวแรกในแอป พร้อม `register`, `login` และ `me` ที่มี guard คุ้มกันอยู่
+
+## Why
+
+แนวทาง **code-first** ของ `@nestjs/graphql` หมายความว่า GraphQL schema ถูก *สร้างขึ้น* จากคลาส TypeScript ที่ decorate ไว้ แทนที่จะเขียนเป็นไฟล์ SDL `.graphql` ด้วยมือแล้วคอยซิงค์เอง `autoSchemaFile: join(process.cwd(), 'src/schema.gql')` บอกให้ `GraphQLModule` เขียน schema ที่สร้างขึ้นนั้นลงดิสก์ตอน boot — decorator `@ObjectType()`/`@Field()` และ `@InputType()`/`@Field()` คือแหล่งความจริงเดียว และ `schema.gql` คือ build artifact ไม่ใช่อะไรที่ควรแก้ด้วยมือ [GraphQL API](/devblog/th/graphql-api/) จะลงลึกเรื่อง decorator แบบ code-first เหล่านี้เอง บทเรียนนี้ใช้แค่พอที่จะเดินสาย auth ให้ทำงานได้
+
+`User` ใน `apps/api/src/users/models/user.model.ts` คือ**คลาสใหม่** ที่แยกออกจาก `User` ของ Mongoose ใน `schemas/user.schema.ts` — ชื่อเดียวกัน ไฟล์คนละไฟล์ หน้าที่คนละอย่าง คลาส Mongoose อธิบายสิ่งที่ถูกเก็บไว้ (รวมถึง `passwordHash`); คลาส GraphQL อธิบายสิ่งที่ client ได้รับอนุญาตให้รับ (`id`, `email`, `displayName`, `role` — `passwordHash` ไม่มี `@Field()` เลยและไม่มีทางโผล่ใน response ได้ ไม่ว่า query จะขออะไรก็ตาม) method `toGraphQLUser` แบบ private ของ `AuthResolver` คือขอบเขตที่ชัดเจนระหว่างสองสิ่งนี้: มันอ่าน `UserDocument` แล้วคืนเฉพาะ field ที่ GraphQL type ประกาศไว้เท่านั้น
+
+`RegisterInput` คือ**คลาสใหม่** ไม่ใช่ `CreateUserDto` ที่ติด `@InputType()` เพิ่มเข้าไป [Validation](/devblog/th/backend-foundations/validation/) ตั้งใจปล่อยให้ `CreateUserDto` นำกลับมาใช้ซ้ำได้สำหรับการขยายแบบนี้อยู่แล้ว — แต่การลงทะเบียนเป็น operation ที่แยกออกจาก "สร้าง user" ทั่วไป: มันออก token ด้วย มันคือ write path เดียวที่ client แบบไม่ระบุตัวตนได้รับอนุญาตให้เรียก และการให้มันมี input type ของตัวเองหมายความว่าการเปลี่ยนความหมายของ "สร้าง user" สำหรับ mutation จัดการ user ฝั่ง admin ในภายหลัง ใน [GraphQL API](/devblog/th/graphql-api/) จะไม่มีทางแตะสิ่งที่ visitor สาธารณะส่งมาตอนสมัครเลย
+
+`context: ({ req }) => ({ req })` ของ `GraphQLModule.forRoot` คือสิ่งที่ทำให้ guard และ decorator ทุกตัวใน [Guards & roles](/devblog/th/auth/guards-roles/) ทำงานได้เลย — มันคือฟังก์ชันที่ใส่ `req` object ของ Express เข้าไปใน GraphQL context ในทุก request ซึ่งตรงกับสิ่งที่ `GqlExecutionContext.create(context).getContext().req` อ่านออกมาเป๊ะ ๆ
+
+## Pros & cons
+
+**`playground: true` ในตัวของ Apollo เทียบกับ Apollo Sandbox** GraphQL Playground แบบ embedded คลาสสิกของ Apollo Server (`playground: true`) ถูก deprecate ต้นน้ำแล้วและมีกำหนดจะถูกถอดออก — สิ่งที่มาแทนที่อย่างเป็นทางการตอนนี้คือ Apollo Sandbox เปิดใช้งานด้วย `playground: false` บวกกับ plugin `ApolloServerPluginLandingPageLocalDefault` Sandbox มีค่าใช้จ่ายเป็น import เพิ่มหนึ่งตัวและ setup ที่ "zero-config" น้อยลงนิดหน่อย แลกกับการใช้ IDE แบบ interactive ที่ Apollo ดูแลต่อไปจริง ๆ แทนที่จะเป็นตัวที่หยุดพัฒนาไปแล้ว บทเรียนนี้ใช้ Sandbox ด้วยเหตุผลนั้น แม้ว่า `playground: true` จะยังใช้งานได้จริงในทางเทคนิคทุกวันนี้ก็ตาม
+
+**Guard แค่ `me` เทียบกับ guard ทั้ง resolver** `@UseGuards(GqlAuthGuard)` ถูกใช้กับ query method `me` เท่านั้น ไม่ใช่กับคลาส `AuthResolver` ทั้งคลาส — เพราะ `register` กับ `login` คือสอง operation ที่ client แบบไม่ระบุตัวตนที่ยังไม่ authenticated ต้องเรียกได้ `@UseGuards()` ระดับ class จะล็อกไม่ให้เรียก request ที่ resolver นี้มีไว้จัดการเลย การใส่ guard เป็นราย method มีค่าใช้จ่ายเป็น decorator เพิ่มหนึ่งบรรทัดต่อ operation ที่ต้องป้องกัน แลกกับที่ `register`/`login` ยังเข้าถึงได้ตามที่ออกแบบไว้ ไม่ใช่ด้วยข้อยกเว้นที่พลาดง่ายซึ่งฝังไว้ในกฎแบบครอบคลุมทั้งหมด
+
+## Set it up
+
+ติดตั้ง package GraphQL:
+
+```bash
+cd apps/api
+npm install @nestjs/graphql @nestjs/apollo @apollo/server graphql
+```
+
+สร้าง `apps/api/src/users/models/user.model.ts`:
+
+```ts
+import { Field, ObjectType } from '@nestjs/graphql';
+
+@ObjectType()
+export class User {
+  @Field()
+  id: string;
+
+  @Field()
+  email: string;
+
+  @Field()
+  displayName: string;
+
+  @Field()
+  role: string;
+}
+```
+
+สร้าง `apps/api/src/auth/models/auth-payload.model.ts`:
+
+```ts
+import { Field, ObjectType } from '@nestjs/graphql';
+import { User } from '../../users/models/user.model';
+
+@ObjectType()
+export class AuthPayload {
+  @Field()
+  token: string;
+
+  @Field(() => User)
+  user: User;
+}
+```
+
+สร้าง `apps/api/src/auth/dto/register.input.ts`:
+
+```ts
+import { Field, InputType } from '@nestjs/graphql';
+import { IsEmail, IsString, MinLength } from 'class-validator';
+
+@InputType()
+export class RegisterInput {
+  @Field()
+  @IsEmail()
+  email: string;
+
+  @Field()
+  @IsString()
+  @MinLength(8)
+  password: string;
+
+  @Field()
+  @IsString()
+  @MinLength(2)
+  displayName: string;
+}
+```
+
+สร้าง `apps/api/src/auth/dto/login.input.ts`:
+
+```ts
+import { Field, InputType } from '@nestjs/graphql';
+import { IsEmail, IsString } from 'class-validator';
+
+@InputType()
+export class LoginInput {
+  @Field()
+  @IsEmail()
+  email: string;
+
+  @Field()
+  @IsString()
+  password: string;
+}
+```
+
+Decorator ของ `class-validator` ตรงนี้ถูกอ่านโดย `ValidationPipe` แบบ global ตัวเดียวกับ [Validation](/devblog/th/backend-foundations/validation/) — Nest รันมันกับ resolver argument แบบเดียวเป๊ะ ๆ กับที่รันกับ `@Body()` ของ REST โดยไม่ต้องเดินสายเพิ่มเลย
+
+สร้าง `apps/api/src/auth/auth.resolver.ts`:
+
+```ts
+import { NotFoundException, UnauthorizedException, UseGuards } from '@nestjs/common';
+import { Args, Mutation, Query, Resolver } from '@nestjs/graphql';
+import { AuthService } from './auth.service';
+import { UsersService } from '../users/users.service';
+import { UserDocument } from '../users/schemas/user.schema';
+import { User } from '../users/models/user.model';
+import { AuthPayload } from './models/auth-payload.model';
+import { RegisterInput } from './dto/register.input';
+import { LoginInput } from './dto/login.input';
+import { GqlAuthGuard } from './gql-auth.guard';
+import { CurrentUser } from './current-user.decorator';
+
+interface AuthenticatedUser {
+  userId: string;
+  email: string;
+  role: 'author' | 'admin';
+}
+
+@Resolver()
+export class AuthResolver {
+  constructor(
+    private readonly authService: AuthService,
+    private readonly usersService: UsersService,
+  ) {}
+
+  @Mutation(() => AuthPayload)
+  async register(@Args('input') input: RegisterInput): Promise<AuthPayload> {
+    const user = await this.usersService.create(input);
+    return { token: this.authService.issueToken(user), user: this.toGraphQLUser(user) };
+  }
+
+  @Mutation(() => AuthPayload)
+  async login(@Args('input') input: LoginInput): Promise<AuthPayload> {
+    const user = await this.authService.validateUser(input.email, input.password);
+    if (!user) {
+      throw new UnauthorizedException('Invalid email or password');
+    }
+    return { token: this.authService.issueToken(user), user: this.toGraphQLUser(user) };
+  }
+
+  @Query(() => User)
+  @UseGuards(GqlAuthGuard)
+  async me(@CurrentUser() currentUser: AuthenticatedUser): Promise<User> {
+    const user = await this.usersService.findById(currentUser.userId);
+    if (!user) {
+      throw new NotFoundException('User not found');
+    }
+    return this.toGraphQLUser(user);
+  }
+
+  private toGraphQLUser(user: UserDocument): User {
+    return {
+      id: user.id,
+      email: user.email,
+      displayName: user.displayName,
+      role: user.role,
+    };
+  }
+}
+```
+
+- **`register`** เรียก `UsersService.create` จาก [Password hashing](/devblog/th/auth/passwords/) (bcrypt hashing, `409` เมื่อ email ซ้ำ — ทั้งคู่ใช้ตรงนี้โดยไม่เปลี่ยนแปลง) แล้ว sign token ให้ user ใหม่ทันที เพื่อให้ client ที่เพิ่งลงทะเบียนไม่ต้องเรียก `login` ซ้ำอีกครั้ง
+- **`login`** เปลี่ยนผล `null` ตัวเดียวของ `AuthService.validateUser` — ที่ครอบคลุมทั้ง "ไม่มี user นี้" และ "รหัสผ่านผิด" — ให้เป็น `UnauthorizedException` แบบทั่วไปตัวเดียว ไม่เปิดเผยเลยว่าสองกรณีไหนที่เกิดขึ้นจริง
+- **`me`** คือ operation เดียวที่มี guard คุ้มกัน `@CurrentUser()` อ่านรูปร่าง `{ userId, email, role }` ที่ `JwtStrategy.validate` สร้างขึ้น; `me` ยังคง `findById` ใหม่แทนที่จะเชื่อ `email`/`role` ของ token โดยตรง เพราะ [JWT & Passport](/devblog/th/auth/jwt-passport/) ได้ระบุ trade-off เรื่องข้อมูลค้างไว้แล้ว — `me` คือจุดเดียวในโมดูลนี้ที่การอ่านข้อมูลปัจจุบันแทนการเชื่อ token ทำได้ง่ายและคุ้มค่า
+- **`toGraphQLUser`** คือจุดเดียวที่ `UserDocument` กลายเป็น `User` — code path เดียวใน resolver ที่แตะ field ของ Mongoose โดยตรง ทำให้ `passwordHash` ไม่มีทางอยู่ห่างจาก `@Field()` แค่การเรียก property หนึ่งครั้งเลย
+
+อัปเดต `apps/api/src/auth/auth.module.ts` ให้ลงทะเบียน `AuthResolver`:
+
+```ts
+import { Module } from '@nestjs/common';
+import { ConfigService } from '@nestjs/config';
+import { JwtModule } from '@nestjs/jwt';
+import { PassportModule } from '@nestjs/passport';
+import { UsersModule } from '../users/users.module';
+import { AuthService } from './auth.service';
+import { JwtStrategy } from './jwt.strategy';
+import { AuthResolver } from './auth.resolver';
+
+@Module({
+  imports: [
+    UsersModule,
+    PassportModule,
+    JwtModule.registerAsync({
+      inject: [ConfigService],
+      useFactory: (configService: ConfigService) => ({
+        secret: configService.getOrThrow<string>('JWT_SECRET'),
+        signOptions: { expiresIn: '7d' },
+      }),
+    }),
+  ],
+  providers: [AuthService, JwtStrategy, AuthResolver],
+  exports: [AuthService],
+})
+export class AuthModule {}
+```
+
+Smoke check `onModuleInit` ชั่วคราวจาก [JWT & Passport](/devblog/th/auth/jwt-passport/) เอาออกจาก `AuthService` ได้แล้วตอนนี้ — `register`, `login` และ `me` ด้านล่างนี้คือของจริงที่ curl ได้ (จริง ๆ คือ playground ได้) มาแทนที่มัน
+
+อัปเดต `apps/api/src/app.module.ts` เพื่อ bootstrap GraphQL:
+
+```ts
+import { join } from 'node:path';
+import { Module } from '@nestjs/common';
+import { ConfigModule, ConfigService } from '@nestjs/config';
+import { MongooseModule } from '@nestjs/mongoose';
+import { GraphQLModule } from '@nestjs/graphql';
+import { ApolloDriver, ApolloDriverConfig } from '@nestjs/apollo';
+import { ApolloServerPluginLandingPageLocalDefault } from '@apollo/server/plugin/landingPage/default';
+import { Logger } from '@nestjs/common';
+import { Connection } from 'mongoose';
+import * as Joi from 'joi';
+import { AppController } from './app.controller';
+import { AppService } from './app.service';
+import { PostsModule } from './posts/posts.module';
+import { UsersModule } from './users/users.module';
+import { AuthModule } from './auth/auth.module';
+
+@Module({
+  imports: [
+    ConfigModule.forRoot({
+      isGlobal: true,
+      envFilePath: '../../.env',
+      validationSchema: Joi.object({
+        MONGODB_URI: Joi.string().uri().required(),
+        JWT_SECRET: Joi.string().min(10).required(),
+        API_PORT: Joi.number().port().default(4000),
+        WEB_ORIGIN: Joi.string().uri().required(),
+      }),
+      validationOptions: {
+        allowUnknown: true,
+        abortEarly: false,
+      },
+    }),
+    MongooseModule.forRootAsync({
+      inject: [ConfigService],
+      useFactory: (configService: ConfigService) => ({
+        uri: configService.getOrThrow<string>('MONGODB_URI'),
+        onConnectionCreate: (connection: Connection) => {
+          connection.on('connected', () =>
+            new Logger('MongooseModule').log('MongoDB connected'),
+          );
+          return connection;
+        },
+      }),
+    }),
+    GraphQLModule.forRoot<ApolloDriverConfig>({
+      driver: ApolloDriver,
+      autoSchemaFile: join(process.cwd(), 'src/schema.gql'),
+      sortSchema: true,
+      playground: false,
+      plugins: [ApolloServerPluginLandingPageLocalDefault()],
+      context: ({ req }) => ({ req }),
+    }),
+    PostsModule,
+    UsersModule,
+    AuthModule,
+  ],
+  controllers: [AppController],
+  providers: [AppService],
+})
+export class AppModule {}
+```
+
+- **`autoSchemaFile: join(process.cwd(), 'src/schema.gql')`** เขียน schema ที่สร้างขึ้นลงที่ `apps/api/src/schema.gql` ในทุกครั้งที่ boot — เพิ่ม path นั้นเข้า `.gitignore` เพราะมันคือ build artifact ไม่ใช่ source
+- **`sortSchema: true`** ทำให้ลำดับ type ใน SDL ที่สร้างขึ้นเรียงตามตัวอักษรแทนที่จะเรียงตามลำดับการประกาศ ทำให้ diff ของ `schema.gql` เล็กและ review ง่ายขึ้นเมื่อมี type เพิ่มเข้ามาใน [GraphQL API](/devblog/th/graphql-api/) ต่อไป
+- **`context: ({ req }) => ({ req })`** คือสิ่งที่ `GqlAuthGuard`, `RolesGuard` และ `@CurrentUser()` จาก [Guards & roles](/devblog/th/auth/guards-roles/) อ่านออกมาทั้งหมด — ถ้าไม่มีสิ่งนี้ `GqlExecutionContext.create(context).getContext().req` จะเป็น `undefined`
+
+## Verify
+
+```bash
+npm run start:dev
+```
+
+เปิด `http://localhost:4000/graphql` ในเบราว์เซอร์ — Apollo Sandbox จะโหลดขึ้นมาแทนที่ 404 default ของ Express ยืนยันว่า `GraphQLModule` mount endpoint สำเร็จ รัน mutation `register`:
+
+```graphql
+mutation Register {
+  register(
+    input: {
+      email: "author@example.com"
+      password: "correct-horse"
+      displayName: "Ava"
+    }
+  ) {
+    token
+    user {
+      id
+      email
+      displayName
+      role
+    }
+  }
+}
+```
+
+```txt
+{
+  "data": {
+    "register": {
+      "token": "eyJhbGciOiJIUzI1NiIs...",
+      "user": { "id": "...", "email": "author@example.com", "displayName": "Ava", "role": "author" }
+    }
+  }
+}
+```
+
+การลงทะเบียน email เดียวกันซ้ำจะคืน GraphQL error ที่มี message ของ `ConflictException` แทนที่จะได้ token ตัวที่สอง — `409` จาก [Password hashing](/devblog/th/auth/passwords/) ยังคงใช้ได้โดยไม่เปลี่ยนแปลง ตอนนี้รัน `login` ด้วย credential ชุดเดียวกัน:
+
+```graphql
+mutation Login {
+  login(input: { email: "author@example.com", password: "correct-horse" }) {
+    token
+    user {
+      id
+      email
+      displayName
+      role
+    }
+  }
+}
+```
+
+คัดลอก `token` จาก response ตัวใดตัวหนึ่งไปวางในแผง **Headers** ของ Sandbox:
+
+```txt
+{ "Authorization": "Bearer eyJhbGciOiJIUzI1NiIs..." }
+```
+
+จากนั้นรัน:
+
+```graphql
+query Me {
+  me {
+    id
+    email
+    displayName
+    role
+  }
+}
+```
+
+```txt
+{
+  "data": {
+    "me": { "id": "...", "email": "author@example.com", "displayName": "Ava", "role": "author" }
+  }
+}
+```
+
+รัน `me` อีกครั้งโดยเอา header `Authorization` ออก (หรือใส่ token ที่ไม่ valid) แล้วมันจะ fail แทน — `GqlAuthGuard` ปฏิเสธ request ก่อนที่ `AuthResolver.me` จะได้รันเลยด้วยซ้ำ ยืนยันว่า guard ของ [Guards & roles](/devblog/th/auth/guards-roles/) ถูกเดินสายเข้ากับ operation จริงแล้วตอนนี้ ไม่ใช่แค่ compile ผ่านเฉย ๆ
+
+## Recap
+
+`GraphQLModule.forRoot<ApolloDriverConfig>` พร้อม `autoSchemaFile` เปลี่ยนคลาสที่ decorate ไว้ให้กลายเป็น `schema.gql` ตอน boot — `User` และ `AuthPayload` แบบ `@ObjectType()` อธิบายสิ่งที่ client อ่านได้ โดยตั้งใจแยกออกจากคลาส schema ของ Mongoose ที่อธิบายสิ่งที่ถูกเก็บไว้ `RegisterInput`/`LoginInput` คือ DTO แบบ `@InputType()` ที่ validate ด้วย `ValidationPipe` แบบ global ตัวเดียวกับที่ REST endpoint ทุกตัวใช้อยู่แล้ว `AuthResolver` คือ resolver ตัวแรกในแอป: `register` กับ `login` เปิดให้ client แบบไม่ระบุตัวตนเรียกได้และคืน `AuthPayload`; `me` คือ operation เดียวที่มี guard คุ้มกัน ป้องกันด้วย `GqlAuthGuard` และอ่านผู้เรียกผ่าน `@CurrentUser()` ทุกชิ้นจากโมดูลนี้มารวมกันที่นี่ — bcrypt hashing และ lookup จาก [Password hashing](/devblog/th/auth/passwords/), การออกและ validate token จาก [JWT & Passport](/devblog/th/auth/jwt-passport/) และคู่ guard/decorator จาก [Guards & roles](/devblog/th/auth/guards-roles/) — กลายเป็น authentication flow เดียวที่ทำงานได้จริงและ verify ผ่าน playground ได้
+
+ถัดไป: [GraphQL API →](/devblog/th/graphql-api/)

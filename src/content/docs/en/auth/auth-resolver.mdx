@@ -1,0 +1,376 @@
+---
+title: Auth resolver & GraphQL setup
+description: "Bootstrap GraphQLModule.forRoot code-first, add the User and AuthPayload object types, and write AuthResolver's register, login, and me — the first resolver in the app."
+sidebar:
+  order: 4
+---
+
+## What we're building
+
+`GraphQLModule.forRoot<ApolloDriverConfig>` in `app.module.ts` — the first GraphQL wiring in DevBlog. Alongside it, `apps/api/src/users/models/user.model.ts` (a code-first `User` GraphQL type — deliberately separate from the Mongoose `User` schema class), `apps/api/src/auth/models/auth-payload.model.ts` (`AuthPayload`), two `@InputType` DTOs (`RegisterInput`, `LoginInput`), and `apps/api/src/auth/auth.resolver.ts` — `AuthResolver`, the first resolver in the app, with `register`, `login`, and a guarded `me`.
+
+## Why
+
+`@nestjs/graphql`'s **code-first** approach means the GraphQL schema is *generated* from decorated TypeScript classes, rather than hand-written as a `.graphql` SDL file and kept in sync by hand. `autoSchemaFile: join(process.cwd(), 'src/schema.gql')` tells `GraphQLModule` to write that generated schema to disk at boot — `@ObjectType()`/`@Field()` and `@InputType()`/`@Field()` decorators are the single source of truth, and `schema.gql` is a build artifact, not something to hand-edit. [GraphQL API](/devblog/en/graphql-api/) covers the code-first decorators themselves in depth; this lesson only uses enough of them to wire up auth.
+
+`User` in `apps/api/src/users/models/user.model.ts` is a **new class**, distinct from the Mongoose `User` in `schemas/user.schema.ts` — same name, different file, different job. The Mongoose class describes what's stored (including `passwordHash`); the GraphQL class describes what a client is allowed to receive (`id`, `email`, `displayName`, `role` — `passwordHash` has no `@Field()` and can never appear in a response, no matter what a query asks for). `AuthResolver`'s private `toGraphQLUser` method is the explicit boundary between the two: it reads a `UserDocument` and returns only the fields the GraphQL type declares.
+
+`RegisterInput` is a **new class**, not `CreateUserDto` with `@InputType()` bolted onto it. [Validation](/devblog/en/backend-foundations/validation/) left `CreateUserDto` deliberately reusable for exactly this kind of extension — but registration is a distinct operation from a generic "create a user" record: it issues a token, it's the one write path anonymous clients are allowed to call, and giving it its own input type means changing what "create a user" means for an admin-facing user-management mutation later, in [GraphQL API](/devblog/en/graphql-api/), never has to touch what a public visitor sends to sign up.
+
+`GraphQLModule.forRoot`'s `context: ({ req }) => ({ req })` is what makes every guard and decorator in [Guards & roles](/devblog/en/auth/guards-roles/) work at all — it's the function that puts the Express `req` object into the GraphQL context on every request, which is exactly what `GqlExecutionContext.create(context).getContext().req` reads back out.
+
+## Pros & cons
+
+**Apollo's built-in `playground: true` vs. Apollo Sandbox.** Apollo Server's classic embedded GraphQL Playground (`playground: true`) is deprecated upstream and slated for removal — the current, documented replacement is Apollo Sandbox, enabled with `playground: false` plus the `ApolloServerPluginLandingPageLocalDefault` plugin. Sandbox costs one extra import and a slightly less "zero-config" setup line, in exchange for using the interactive IDE Apollo actually maintains going forward instead of a frozen, unmaintained one. This lesson uses Sandbox for that reason, even though `playground: true` still technically works today.
+
+**Guarding `me` alone vs. guarding the whole resolver.** `@UseGuards(GqlAuthGuard)` is applied to the `me` query method only, not to the `AuthResolver` class as a whole — because `register` and `login` are the two operations an anonymous, not-yet-authenticated client must be able to call. A class-level `@UseGuards()` would lock out the very requests this resolver exists to handle; per-method guards cost one extra decorator line per protected operation, in exchange for `register`/`login` staying reachable by design, not by an easy-to-miss exception carved into a blanket rule.
+
+## Set it up
+
+Install the GraphQL packages:
+
+```bash
+cd apps/api
+npm install @nestjs/graphql @nestjs/apollo @apollo/server graphql
+```
+
+Create `apps/api/src/users/models/user.model.ts`:
+
+```ts
+import { Field, ObjectType } from '@nestjs/graphql';
+
+@ObjectType()
+export class User {
+  @Field()
+  id: string;
+
+  @Field()
+  email: string;
+
+  @Field()
+  displayName: string;
+
+  @Field()
+  role: string;
+}
+```
+
+Create `apps/api/src/auth/models/auth-payload.model.ts`:
+
+```ts
+import { Field, ObjectType } from '@nestjs/graphql';
+import { User } from '../../users/models/user.model';
+
+@ObjectType()
+export class AuthPayload {
+  @Field()
+  token: string;
+
+  @Field(() => User)
+  user: User;
+}
+```
+
+Create `apps/api/src/auth/dto/register.input.ts`:
+
+```ts
+import { Field, InputType } from '@nestjs/graphql';
+import { IsEmail, IsString, MinLength } from 'class-validator';
+
+@InputType()
+export class RegisterInput {
+  @Field()
+  @IsEmail()
+  email: string;
+
+  @Field()
+  @IsString()
+  @MinLength(8)
+  password: string;
+
+  @Field()
+  @IsString()
+  @MinLength(2)
+  displayName: string;
+}
+```
+
+Create `apps/api/src/auth/dto/login.input.ts`:
+
+```ts
+import { Field, InputType } from '@nestjs/graphql';
+import { IsEmail, IsString } from 'class-validator';
+
+@InputType()
+export class LoginInput {
+  @Field()
+  @IsEmail()
+  email: string;
+
+  @Field()
+  @IsString()
+  password: string;
+}
+```
+
+`class-validator` decorators here are read by the same global `ValidationPipe` from [Validation](/devblog/en/backend-foundations/validation/) — Nest runs it against resolver arguments exactly the way it runs against REST `@Body()`, with no extra wiring.
+
+Create `apps/api/src/auth/auth.resolver.ts`:
+
+```ts
+import { NotFoundException, UnauthorizedException, UseGuards } from '@nestjs/common';
+import { Args, Mutation, Query, Resolver } from '@nestjs/graphql';
+import { AuthService } from './auth.service';
+import { UsersService } from '../users/users.service';
+import { UserDocument } from '../users/schemas/user.schema';
+import { User } from '../users/models/user.model';
+import { AuthPayload } from './models/auth-payload.model';
+import { RegisterInput } from './dto/register.input';
+import { LoginInput } from './dto/login.input';
+import { GqlAuthGuard } from './gql-auth.guard';
+import { CurrentUser } from './current-user.decorator';
+
+interface AuthenticatedUser {
+  userId: string;
+  email: string;
+  role: 'author' | 'admin';
+}
+
+@Resolver()
+export class AuthResolver {
+  constructor(
+    private readonly authService: AuthService,
+    private readonly usersService: UsersService,
+  ) {}
+
+  @Mutation(() => AuthPayload)
+  async register(@Args('input') input: RegisterInput): Promise<AuthPayload> {
+    const user = await this.usersService.create(input);
+    return { token: this.authService.issueToken(user), user: this.toGraphQLUser(user) };
+  }
+
+  @Mutation(() => AuthPayload)
+  async login(@Args('input') input: LoginInput): Promise<AuthPayload> {
+    const user = await this.authService.validateUser(input.email, input.password);
+    if (!user) {
+      throw new UnauthorizedException('Invalid email or password');
+    }
+    return { token: this.authService.issueToken(user), user: this.toGraphQLUser(user) };
+  }
+
+  @Query(() => User)
+  @UseGuards(GqlAuthGuard)
+  async me(@CurrentUser() currentUser: AuthenticatedUser): Promise<User> {
+    const user = await this.usersService.findById(currentUser.userId);
+    if (!user) {
+      throw new NotFoundException('User not found');
+    }
+    return this.toGraphQLUser(user);
+  }
+
+  private toGraphQLUser(user: UserDocument): User {
+    return {
+      id: user.id,
+      email: user.email,
+      displayName: user.displayName,
+      role: user.role,
+    };
+  }
+}
+```
+
+- **`register`** calls `UsersService.create` from [Password hashing](/devblog/en/auth/passwords/) (bcrypt hashing, the `409` on a duplicate email — both apply here unchanged) and immediately signs a token for the new user, so a client that just registered doesn't have to make a second `login` call.
+- **`login`** turns `AuthService.validateUser`'s single `null` result — covering both "no such user" and "wrong password" — into one generic `UnauthorizedException`, never revealing which of the two actually happened.
+- **`me`** is the only guarded operation. `@CurrentUser()` reads the `{ userId, email, role }` shape `JwtStrategy.validate` produces; `me` still does a fresh `findById` rather than trusting the token's `email`/`role` directly, since [JWT & Passport](/devblog/en/auth/jwt-passport/) already named that staleness trade-off — `me` is the one place in this module where reading current data instead of trusting the token is easy and worth it.
+- **`toGraphQLUser`** is the one place a `UserDocument` becomes a `User` — the only code path in the resolver that touches Mongoose fields directly, keeping `passwordHash` from ever being one property access away from a `@Field()`.
+
+Update `apps/api/src/auth/auth.module.ts` to register `AuthResolver`:
+
+```ts
+import { Module } from '@nestjs/common';
+import { ConfigService } from '@nestjs/config';
+import { JwtModule } from '@nestjs/jwt';
+import { PassportModule } from '@nestjs/passport';
+import { UsersModule } from '../users/users.module';
+import { AuthService } from './auth.service';
+import { JwtStrategy } from './jwt.strategy';
+import { AuthResolver } from './auth.resolver';
+
+@Module({
+  imports: [
+    UsersModule,
+    PassportModule,
+    JwtModule.registerAsync({
+      inject: [ConfigService],
+      useFactory: (configService: ConfigService) => ({
+        secret: configService.getOrThrow<string>('JWT_SECRET'),
+        signOptions: { expiresIn: '7d' },
+      }),
+    }),
+  ],
+  providers: [AuthService, JwtStrategy, AuthResolver],
+  exports: [AuthService],
+})
+export class AuthModule {}
+```
+
+The temporary `onModuleInit` smoke check from [JWT & Passport](/devblog/en/auth/jwt-passport/) can come out of `AuthService` now — `register`, `login`, and `me` below are a real, curl-able (well, playground-able) replacement for it.
+
+Update `apps/api/src/app.module.ts` to bootstrap GraphQL:
+
+```ts
+import { join } from 'node:path';
+import { Module } from '@nestjs/common';
+import { ConfigModule, ConfigService } from '@nestjs/config';
+import { MongooseModule } from '@nestjs/mongoose';
+import { GraphQLModule } from '@nestjs/graphql';
+import { ApolloDriver, ApolloDriverConfig } from '@nestjs/apollo';
+import { ApolloServerPluginLandingPageLocalDefault } from '@apollo/server/plugin/landingPage/default';
+import { Logger } from '@nestjs/common';
+import { Connection } from 'mongoose';
+import * as Joi from 'joi';
+import { AppController } from './app.controller';
+import { AppService } from './app.service';
+import { PostsModule } from './posts/posts.module';
+import { UsersModule } from './users/users.module';
+import { AuthModule } from './auth/auth.module';
+
+@Module({
+  imports: [
+    ConfigModule.forRoot({
+      isGlobal: true,
+      envFilePath: '../../.env',
+      validationSchema: Joi.object({
+        MONGODB_URI: Joi.string().uri().required(),
+        JWT_SECRET: Joi.string().min(10).required(),
+        API_PORT: Joi.number().port().default(4000),
+        WEB_ORIGIN: Joi.string().uri().required(),
+      }),
+      validationOptions: {
+        allowUnknown: true,
+        abortEarly: false,
+      },
+    }),
+    MongooseModule.forRootAsync({
+      inject: [ConfigService],
+      useFactory: (configService: ConfigService) => ({
+        uri: configService.getOrThrow<string>('MONGODB_URI'),
+        onConnectionCreate: (connection: Connection) => {
+          connection.on('connected', () =>
+            new Logger('MongooseModule').log('MongoDB connected'),
+          );
+          return connection;
+        },
+      }),
+    }),
+    GraphQLModule.forRoot<ApolloDriverConfig>({
+      driver: ApolloDriver,
+      autoSchemaFile: join(process.cwd(), 'src/schema.gql'),
+      sortSchema: true,
+      playground: false,
+      plugins: [ApolloServerPluginLandingPageLocalDefault()],
+      context: ({ req }) => ({ req }),
+    }),
+    PostsModule,
+    UsersModule,
+    AuthModule,
+  ],
+  controllers: [AppController],
+  providers: [AppService],
+})
+export class AppModule {}
+```
+
+- **`autoSchemaFile: join(process.cwd(), 'src/schema.gql')`** writes the generated schema to `apps/api/src/schema.gql` on every boot — add that path to `.gitignore`, it's a build artifact, not source.
+- **`sortSchema: true`** keeps the generated SDL's type order lexicographic instead of declaration order, so `schema.gql` diffs stay small and reviewable as more types are added in [GraphQL API](/devblog/en/graphql-api/).
+- **`context: ({ req }) => ({ req })`** is what `GqlAuthGuard`, `RolesGuard`, and `@CurrentUser()` from [Guards & roles](/devblog/en/auth/guards-roles/) all read from — without it, `GqlExecutionContext.create(context).getContext().req` would be `undefined`.
+
+## Verify
+
+```bash
+npm run start:dev
+```
+
+Open `http://localhost:4000/graphql` in a browser — Apollo Sandbox loads instead of Express's default 404, confirming `GraphQLModule` mounted the endpoint. Run a `register` mutation:
+
+```graphql
+mutation Register {
+  register(
+    input: {
+      email: "author@example.com"
+      password: "correct-horse"
+      displayName: "Ava"
+    }
+  ) {
+    token
+    user {
+      id
+      email
+      displayName
+      role
+    }
+  }
+}
+```
+
+```txt
+{
+  "data": {
+    "register": {
+      "token": "eyJhbGciOiJIUzI1NiIs...",
+      "user": { "id": "...", "email": "author@example.com", "displayName": "Ava", "role": "author" }
+    }
+  }
+}
+```
+
+Registering the same email again returns a GraphQL error carrying `ConflictException`'s message, instead of a second token — the `409` from [Password hashing](/devblog/en/auth/passwords/) still applies unchanged. Now run `login` with the same credentials:
+
+```graphql
+mutation Login {
+  login(input: { email: "author@example.com", password: "correct-horse" }) {
+    token
+    user {
+      id
+      email
+      displayName
+      role
+    }
+  }
+}
+```
+
+Copy the `token` from either response into the Sandbox's **Headers** panel:
+
+```txt
+{ "Authorization": "Bearer eyJhbGciOiJIUzI1NiIs..." }
+```
+
+Then run:
+
+```graphql
+query Me {
+  me {
+    id
+    email
+    displayName
+    role
+  }
+}
+```
+
+```txt
+{
+  "data": {
+    "me": { "id": "...", "email": "author@example.com", "displayName": "Ava", "role": "author" }
+  }
+}
+```
+
+Run `me` again with the `Authorization` header removed (or an invalid token) and it fails instead — `GqlAuthGuard` rejecting the request before `AuthResolver.me` ever runs, confirming [Guards & roles](/devblog/en/auth/guards-roles/)'s guard is actually wired to a live operation now, not just compiling cleanly.
+
+## Recap
+
+`GraphQLModule.forRoot<ApolloDriverConfig>` with `autoSchemaFile` turns decorated classes into `schema.gql` at boot — `User` and `AuthPayload` `@ObjectType()`s describe what a client can read, kept deliberately separate from the Mongoose schema classes that describe what's stored. `RegisterInput`/`LoginInput` are `@InputType()` DTOs validated by the same global `ValidationPipe` every REST endpoint already uses. `AuthResolver` is the first resolver in the app: `register` and `login` are open to anonymous clients and return an `AuthPayload`; `me` is the one guarded operation, protected by `GqlAuthGuard` and reading the caller through `@CurrentUser()`. Every piece from this module lands here — bcrypt hashing and lookups from [Password hashing](/devblog/en/auth/passwords/), token issuing and validation from [JWT & Passport](/devblog/en/auth/jwt-passport/), and the guard/decorator pair from [Guards & roles](/devblog/en/auth/guards-roles/) — as one working, playground-verifiable authentication flow.
+
+Next: [GraphQL API →](/devblog/en/graphql-api/)

@@ -1,0 +1,223 @@
+---
+title: JWT และ Passport
+description: "เดินสาย JwtModule.registerAsync กับ Strategy ของ passport-jwt เพิ่ม AuthService.validateUser และ issueToken แล้วดูว่าจริง ๆ แล้วข้างในตัว JWT ที่ signed แล้วมีอะไรอยู่บ้าง"
+sidebar:
+  order: 2
+---
+
+## What we're building
+
+`apps/api/src/auth/auth.module.ts`, `auth.service.ts` และ `jwt.strategy.ts` — ไฟล์ชุดแรกใน `AuthModule` ตัวใหม่ `JwtModule.registerAsync` อ่าน `JWT_SECRET` ผ่าน `ConfigService` ด้วย pattern `getOrThrow` เดียวกับที่ [Mongoose connection](/devblog/th/backend-foundations/mongoose-connection/) ใช้กับ `MONGODB_URI` `AuthService.validateUser` เช็ครหัสผ่านที่ส่งเข้ามาด้วย `bcrypt.compare` เทียบกับ hash ที่ [Password hashing](/devblog/th/auth/passwords/) สร้างไว้ และ `issueToken` sign JWT ที่บรรจุ payload ที่ส่วนอื่นของโมดูลนี้เชื่อถือ `JwtStrategy` คือส่วนของ `passport-jwt` ที่ภายหลังจะเปลี่ยน header `Authorization: Bearer <token>` ที่ส่งเข้ามาให้กลับเป็น payload ที่ verify แล้ว
+
+## Why
+
+JWT (JSON Web Token) คือสามส่วนที่ encode แบบ base64url ต่อกันด้วยจุด: `header.payload.signature` header ระบุ algorithm ที่ใช้ sign; payload คือ claim ใด ๆ ก็ได้ — ในที่นี้คือ `{ sub: user.id, email, role }`; signature คือ HMAC ของสองส่วนแรกที่คำนวณด้วย `JWT_SECRET` ซึ่งเป็นสิ่งที่ทำให้ token ตรวจจับการแก้ไขได้ ใครก็ตาม decode base64 payload ของ JWT ออกมาอ่านได้ (มัน**ไม่ได้**ถูก encrypt — อย่าใส่รหัสผ่านหรืออะไรก็ตามที่เป็นความลับลงใน payload เด็ดขาด) แต่มีเพียงคนที่ถือ `JWT_SECRET` เท่านั้นที่จะสร้าง signature ที่ `jwtService.verify` ยอมรับได้ แก้ payload แม้แค่หนึ่งตัวอักษรหลังจากนั้น signature ก็จะไม่ตรงกันอีกต่อไป
+
+`sub` คือชื่อ claim ที่ JWT กำหนดไว้สำหรับ "subject" — entity ที่ token พูดถึง — นี่คือเหตุผลที่ `issueToken` ใช้ `sub: user.id` แทนที่จะใช้ชื่อ field ที่ตั้งเอง เครื่องมือใด ๆ ที่รู้จัก JWT ที่ตรวจสอบ token จะจำมันได้ `email` กับ `role` ติดมาด้วยเพราะ `RolesGuard` ของ [Guards & roles](/devblog/th/auth/guards-roles/) ต้องใช้ role ในทุก request โดยไม่ต้อง round trip ไปฐานข้อมูลเพื่อดึงมันมา
+
+นี่คือ session model แบบ **stateless**: server ไม่เคยเก็บที่ไหนเลยว่า "token นี้ยังใช้งานได้อยู่" `JwtStrategy.validate` ทำงานทั้งหมดจาก signature ทาง cryptographic และ claim `exp` ที่ `signOptions: { expiresIn: '7d' }` เพิ่มให้อัตโนมัติ — ไม่มี session table ไม่มีการ lookup Redis ไม่มีการ hit ฐานข้อมูลในทุก authenticated request ความเป็น stateless นี้ก็คือ trade-off ที่คมที่สุดของ JWT เช่นกัน ซึ่งอยู่ด้านล่างนี้
+
+`JwtModule.registerAsync` แทนที่จะเป็น `JwtModule.register` มีเหตุผลเดียวกับ `MongooseModule.forRootAsync`: `JWT_SECRET` ต้องมาจาก `ConfigService` ซึ่งยังไม่มีอยู่จนกว่า DI container ของ Nest จะถูกสร้างขึ้น ดังนั้น `useFactory` จึงเลื่อนการอ่านค่านั้นออกไปจนกว่า `inject: [ConfigService]` จะ resolve เสร็จ
+
+## Pros & cons
+
+**JWT แบบ stateless เทียบกับ session store ฝั่ง server** Session store (table `sessions` หรือ Redis) เพิกถอนสิทธิ์เข้าถึงได้ทันที — ลบ row นั้น user ก็ถูก log out ทุกที่ทันที มันมีค่าใช้จ่ายเป็น round trip ไปฐานข้อมูลหรือ cache ในทุก authenticated request และ store นั้นก็กลายเป็น infrastructure อีกชิ้นที่ต้องรันและ scale JWT แบบ stateless คือภาพสะท้อนตรงข้าม: ไม่มีการเก็บข้อมูล ไม่มีค่าใช้จ่ายในการ lookup และมันทำงานข้าม API instance หลายตัวหลัง load balancer ได้อย่างง่ายดายโดยไม่ต้อง synchronize shared session state เลย — แต่ไม่มีทางเพิกถอน token ก่อนที่ claim `exp` ของมันจะหมดอายุตามธรรมชาติ คอร์สนี้ยอมรับ trade-off นั้นด้วยอายุ `7d` ซึ่งเหมาะกับเครื่องมือ admin/author ขนาดเล็ก ระบบที่ต้องการเพิกถอนได้ทันที (แบน user, token ที่ถูก compromise) ต้องใช้ทั้งอายุสั้นคู่กับ refresh token หรือแบบผสม — denylist ฝั่ง server ที่เช็คเฉพาะตอนเพิกถอน ไม่ใช่ในทุก claim
+
+**`sub`/`email`/`role` ใน payload เทียบกับ `sub` อย่างเดียว** การใส่ `email` กับ `role` เข้าไปใน token หมายความว่า `JwtStrategy.validate` กับ `RolesGuard` ไม่ต้อง call ฐานข้อมูลเพื่อ authorize request เลย — trade-off คือทั้งสอง field ถูกตรึงไว้ ณ ตอนที่ token ถูกออกให้ ถ้า role ของ admin เปลี่ยนกลางวัน ทุก token ที่เขาถืออยู่แล้วจะยังอ้าง role เดิมจนกว่ามันจะหมดอายุและเขา log in ใหม่อีกครั้ง สำหรับอายุ `7d` และการเปลี่ยน role ที่ไม่บ่อย ช่วงเวลาที่ข้อมูลเก่าค้างอยู่นี้เป็น trade-off ที่ยอมรับได้และตั้งใจ ระบบที่ role เปลี่ยนบ่อยกว่านี้ควรเก็บ payload ไว้แค่ `sub` แล้วดึง user (และ role ปัจจุบันของเขา) ใหม่ในทุก request แทน
+
+## Set it up
+
+สร้าง `apps/api/src/auth/jwt.strategy.ts`:
+
+```ts
+import { Injectable } from '@nestjs/common';
+import { PassportStrategy } from '@nestjs/passport';
+import { ConfigService } from '@nestjs/config';
+import { ExtractJwt, Strategy } from 'passport-jwt';
+
+export interface JwtPayload {
+  sub: string;
+  email: string;
+  role: 'author' | 'admin';
+}
+
+@Injectable()
+export class JwtStrategy extends PassportStrategy(Strategy) {
+  constructor(configService: ConfigService) {
+    super({
+      jwtFromRequest: ExtractJwt.fromAuthHeaderAsBearerToken(),
+      ignoreExpiration: false,
+      secretOrKey: configService.getOrThrow<string>('JWT_SECRET'),
+    });
+  }
+
+  validate(payload: JwtPayload) {
+    return { userId: payload.sub, email: payload.email, role: payload.role };
+  }
+}
+```
+
+- **`ExtractJwt.fromAuthHeaderAsBearerToken()`** — อ่าน token จาก `Authorization: Bearer <token>` header มาตรฐานที่ passport-jwt (และ HTTP client library ทุกตัว) คาดหวัง
+- **`ignoreExpiration: false`** — token ที่หมดอายุจะ verify ไม่ผ่านโดยตรง สอดคล้องกับ `expiresIn` ที่ตั้งเป็น `7d` ด้านล่าง นี่คือ default ของ passport-jwt เอง แต่เขียนไว้ตรงนี้ให้เห็นชัดว่ามีการเช็ค expiry จริง ไม่ใช่แค่โดยนัย
+- **`validate`** ทำงานก็ต่อเมื่อทั้ง signature และ expiry ผ่านแล้วเท่านั้น ค่าที่มันคืนกลับมาจะกลายเป็น `req.user` — ปรับรูปแบบตรงนี้เป็น `userId`/`email`/`role` เพราะนั่นคือรูปร่างเป๊ะ ๆ ที่ decorator `@CurrentUser()` และ `RolesGuard` ของ [Guards & roles](/devblog/th/auth/guards-roles/) อ่านออกมาจากมัน
+
+สร้าง `apps/api/src/auth/auth.service.ts`:
+
+```ts
+import { Injectable } from '@nestjs/common';
+import { JwtService } from '@nestjs/jwt';
+import * as bcrypt from 'bcrypt';
+import { UsersService } from '../users/users.service';
+import { UserDocument } from '../users/schemas/user.schema';
+
+@Injectable()
+export class AuthService {
+  constructor(
+    private readonly usersService: UsersService,
+    private readonly jwtService: JwtService,
+  ) {}
+
+  async validateUser(
+    email: string,
+    password: string,
+  ): Promise<UserDocument | null> {
+    const user = await this.usersService.findByEmail(email);
+    if (!user) {
+      return null;
+    }
+
+    const passwordMatches = await bcrypt.compare(password, user.passwordHash);
+    return passwordMatches ? user : null;
+  }
+
+  issueToken(user: UserDocument): string {
+    const payload = { sub: user.id, email: user.email, role: user.role };
+    return this.jwtService.sign(payload);
+  }
+}
+```
+
+- **`bcrypt.compare(password, user.passwordHash)`** derive hash ของรหัสผ่านที่ส่งเข้ามาใหม่โดยใช้ salt ที่ฝังอยู่ใน `passwordHash` อยู่แล้ว แล้วเทียบกันแบบ constant time — มันไม่เคย (และไม่มีทาง) ย้อน `passwordHash` กลับไปเป็นรหัสผ่านเดิมได้เลย
+- **`validateUser` คืน `null`** ทั้งกรณี "ไม่มี user นี้" และ "รหัสผ่านผิด" เป็นเรื่องตั้งใจ: login endpoint ที่แยกสองกรณีนี้ออกจากกันใน response จะบอก attacker ได้ว่า email ไหนถูกลงทะเบียนไว้บ้าง `login` mutation ของ [Auth resolver & GraphQL setup](/devblog/th/auth/auth-resolver/) เปลี่ยน `null` ตัวเดียวนี้ให้เป็น `UnauthorizedException` แบบทั่วไปตัวเดียว
+
+สร้าง `apps/api/src/auth/auth.module.ts`:
+
+```ts
+import { Module } from '@nestjs/common';
+import { ConfigService } from '@nestjs/config';
+import { JwtModule } from '@nestjs/jwt';
+import { PassportModule } from '@nestjs/passport';
+import { UsersModule } from '../users/users.module';
+import { AuthService } from './auth.service';
+import { JwtStrategy } from './jwt.strategy';
+
+@Module({
+  imports: [
+    UsersModule,
+    PassportModule,
+    JwtModule.registerAsync({
+      inject: [ConfigService],
+      useFactory: (configService: ConfigService) => ({
+        secret: configService.getOrThrow<string>('JWT_SECRET'),
+        signOptions: { expiresIn: '7d' },
+      }),
+    }),
+  ],
+  providers: [AuthService, JwtStrategy],
+  exports: [AuthService],
+})
+export class AuthModule {}
+```
+
+ลงทะเบียน `AuthModule` ใน `apps/api/src/app.module.ts` ควบคู่กับ `UsersModule`:
+
+```ts
+import { Module } from '@nestjs/common';
+// ...existing imports
+import { AuthModule } from './auth/auth.module';
+
+@Module({
+  imports: [
+    // ...existing imports (ConfigModule, MongooseModule, PostsModule, UsersModule)
+    AuthModule,
+  ],
+  controllers: [AppController],
+  providers: [AppService],
+})
+export class AppModule {}
+```
+
+ยังไม่มีทางเข้าแบบ HTTP หรือ GraphQL เข้าไปที่ `AuthService` เลยตอนนี้ — นั่นคืองานของ [Auth resolver & GraphQL setup](/devblog/th/auth/auth-resolver/) เพื่อให้การเดินสาย `JwtModule` มองเห็นได้ใน boot log แบบเดียวกับที่ `PostsService` ของ [Mongoose connection](/devblog/th/backend-foundations/mongoose-connection/) พิสูจน์ว่า `forFeature` ทำงาน ให้เพิ่ม smoke check ชั่วคราว:
+
+```ts
+import { Injectable, Logger, OnModuleInit } from '@nestjs/common';
+import { JwtService } from '@nestjs/jwt';
+import * as bcrypt from 'bcrypt';
+import { UsersService } from '../users/users.service';
+import { UserDocument } from '../users/schemas/user.schema';
+
+@Injectable()
+export class AuthService implements OnModuleInit {
+  private readonly logger = new Logger(AuthService.name);
+
+  constructor(
+    private readonly usersService: UsersService,
+    private readonly jwtService: JwtService,
+  ) {}
+
+  onModuleInit(): void {
+    const demoPayload = {
+      sub: 'demo-user-id',
+      email: 'demo@example.com',
+      role: 'author' as const,
+    };
+    const token = this.jwtService.sign(demoPayload);
+    const decoded = this.jwtService.verify(token);
+    this.logger.log(`Signed JWT: ${token}`);
+    this.logger.log(`Verified payload: ${JSON.stringify(decoded)}`);
+  }
+
+  async validateUser(
+    email: string,
+    password: string,
+  ): Promise<UserDocument | null> {
+    const user = await this.usersService.findByEmail(email);
+    if (!user) {
+      return null;
+    }
+
+    const passwordMatches = await bcrypt.compare(password, user.passwordHash);
+    return passwordMatches ? user : null;
+  }
+
+  issueToken(user: UserDocument): string {
+    const payload = { sub: user.id, email: user.email, role: user.role };
+    return this.jwtService.sign(payload);
+  }
+}
+```
+
+`onModuleInit` ตรงนี้เป็นแค่ smoke check ทิ้งขว้าง ไม่ใช่ logic auth จริง — มันมีไว้เพื่อพิสูจน์ว่า `JwtModule.registerAsync` อ่าน `JWT_SECRET` ถูกต้อง และ sign/verify round-trip ได้จริง โดยยังไม่ต้องมี user ที่ลงทะเบียนจริงเลย `validateUser` และ `issueToken` จะได้ถูกใช้งานจริงเมื่อ [Auth resolver & GraphQL setup](/devblog/th/auth/auth-resolver/) เรียกมันจาก mutation `register` กับ `login`
+
+## Verify
+
+```bash
+npm run start:dev
+```
+
+```txt
+[Nest] ... LOG [AuthService] Signed JWT: eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiJkZW1vLXVzZXItaWQiLCJlbWFpbCI6ImRlbW9AZXhhbXBsZS5jb20iLCJyb2xlIjoiYXV0aG9yIiwiaWF0IjoxNzUyMzQ1Njc4LCJleHAiOjE3NTI5NTA0Nzh9.xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
+[Nest] ... LOG [AuthService] Verified payload: {"sub":"demo-user-id","email":"demo@example.com","role":"author","iat":1752345678,"exp":1752950478}
+```
+
+สามส่วนที่คั่นด้วยจุดยืนยันโครงสร้างของ JWT; `iat`/`exp` ยืนยันว่า `signOptions: { expiresIn: '7d' }` มีผลจริง (`exp` ลบ `iat` เท่ากับ `7 * 24 * 60 * 60` วินาทีพอดี) `JWT_SECRET` ที่หายไปหรือสั้นเกินไปจะ fail ดังแทน ด้วย fail-fast guarantee เดียวกับที่ Joi schema ของ [Config & exceptions](/devblog/th/backend-foundations/config-exceptions/) ให้กับตัวแปรที่จำเป็นตัวอื่นทุกตัวอยู่แล้ว:
+
+```txt
+Error: Config validation error: "JWT_SECRET" is required
+```
+
+## Recap
+
+`JwtStrategy` ดึงและ verify Bearer token ด้วย `passport-jwt` โดย resolve `JWT_SECRET` ผ่าน `ConfigService` ด้วยวิธี fail-fast แบบเดียวกับที่ config value อื่นทุกตัวในแอปนี้ถูกอ่าน `AuthService.validateUser` เช็ครหัสผ่านด้วย `bcrypt.compare` เทียบกับ hash ที่ [Password hashing](/devblog/th/auth/passwords/) สร้างไว้ และคืน `null` เมื่อ fail ไม่ว่ากรณีไหน โดยตั้งใจไม่แยก "รหัสผ่านผิด" ออกจาก "ไม่มี user นี้" `issueToken` sign payload `{ sub, email, role }` ด้วยอายุ `7d` — เป็นการออกแบบแบบ stateless ที่ scale ได้โดยไม่ต้องมี session store แต่เพิกถอนก่อนหมดอายุไม่ได้ smoke check `onModuleInit` ชั่วคราวพิสูจน์ว่า sign/verify round trip ทำงาน [Guards & roles](/devblog/th/auth/guards-roles/) คือสิ่งที่จะหยุด request ที่ยังไม่ authenticated หรือสิทธิ์ไม่พอจริง ๆ ในลำดับถัดไป
+
+ถัดไป: [Guards & roles →](/devblog/th/auth/guards-roles/)
