@@ -1,0 +1,378 @@
+---
+title: Slug และการตรวจสอบ
+description: "SlugService ของจริงพร้อมการจัดการ collision เชื่อมเข้ากับ PostsService และ TagsService รวมถึงการดึง excerpt อัตโนมัติและกฎการตรวจสอบที่คุ้มกัน create/update อยู่แล้ว"
+sidebar:
+  order: 1
+---
+
+## What we're building
+
+`apps/api/src/common/slug.service.ts` (`SlugService`) และ `CommonModule` เล็ก ๆ ที่ export มันออกไป — เชื่อมเข้ากับ `PostsService.create`/`update` (slug ของโพสต์ มาจาก `title`) และ `TagsService.create` (slug ของ tag มาจาก `name`) แทนที่ placeholder `TODO(Content Workflow)` ที่เหมือนกันสองจุดซึ่ง [Posts resolver](/devblog/th/graphql-api/posts-resolver/) และ [Tags resolver](/devblog/th/graphql-api/tags-resolver/) ทิ้งไว้ตั้งแต่ Module 5 `PostsService` ยังได้ private helper `deriveExcerpt` เพิ่มมาด้วย ใช้เมื่อ `excerpt` ของ `CreatePostInput`/`UpdatePostInput` ถูกเว้นว่างไว้
+
+## Why
+
+slug คือส่วนที่มนุษย์อ่านได้ของ URL โพสต์สาธารณะ — `/posts/hello-devblog` แทนที่จะเป็น `/posts/671f2a...` เรื่องนี้สำคัญด้วยเหตุผลที่จับต้องได้สองข้อ: ผู้อ่านเดาหรือจำมันได้ และ search engine มอง URL ที่มีคำจริงของโพสต์เป็นสัญญาณความเกี่ยวข้องที่แข็งแรงกว่า database id ที่อ่านไม่ออก [Schemas](/devblog/th/data-modeling/schemas/) กำหนด `Post.slug` เป็น `required, unique, index: true` ไว้แล้ว — บทเรียนนี้คือสิ่งที่ *ผลิต* ค่าที่คู่ควรจะใส่ตรงนั้นจริง ๆ แทนที่ placeholder แบบ regex ของ Module 5
+
+ชื่อสองชื่อที่ต่างกันสามารถ slugify ออกมาเป็น string เดียวกันได้ (`"Hello, DevBlog!"` และ `"Hello DevBlog"` ต่างก็กลายเป็น `hello-devblog`) และ unique index หมายความว่า `save()` ครั้งที่สองจะโยน MongoDB duplicate-key error ดิบ ๆ ออกมาถ้าไม่มีอะไรมาสกัดไว้ก่อน `SlugService.generateUnique` คือตัวป้องกันนี้: มันคำนวณ slug ตั้งต้น แล้วถาม predicate `exists` ที่ผู้เรียกส่งมาว่า candidate นี้ถูกใช้ไปแล้วหรือยัง โดยต่อ `-2`, `-3` ไปเรื่อย ๆ จนกว่าจะเจอตัวที่ว่าง predicate เป็นหน้าที่ของผู้เรียก ไม่ใช่ของ `SlugService` เอง เพราะคำว่า "slug นี้มีอยู่แล้วหรือยัง" หมายถึง query ที่ต่างกันสำหรับ `Post` (เช็คกับ collection `posts` ทั้งหมด) กับ `Tag` (เช็คกับ collection `tags`) — `SlugService` เป็นเจ้าของแค่การแปลง string กับ loop ลองใหม่ ไม่ใช่การเช็ค collision เอง
+
+ถึงอย่างนั้น `TagsService.create` ก็ *ไม่ต้องการ* พฤติกรรม auto-suffix ของ `generateUnique` แม้จะเรียก method เดียวกัน `Post` ที่ชื่อ "Hello, DevBlog" ซ้ำสองครั้งคือโพสต์สองอันที่ต่างกันจริง ๆ ซึ่งบังเอิญมีชื่อซ้ำกัน — การ auto-suffix เป็น `hello-devblog-2` ถูกต้องแล้ว แต่ `Tag` ชื่อ `"NestJS"` ซ้ำสองครั้งคือ tag *เดียวกัน* — [Tags resolver](/devblog/th/graphql-api/tags-resolver/) เลือกที่จะปฏิเสธมันด้วย `409 ConflictException` แทนที่จะสร้าง tag ที่สองซึ่งเหมือนกันทุกประการเงียบ ๆ ไปแล้ว `TagsService.create` ทำแบบนั้นได้ด้วยการเรียก `generateUnique` พร้อม predicate `exists` ที่ resolve เป็น `false` เสมอ — มันไม่มีวัน trigger suffix loop เลย ทำให้การเรียกนั้นลดรูปเหลือแค่การแปลง `slugify()` ครั้งเดียว ส่วนการเช็คซ้ำจริง ๆ ยังคงเกิดขึ้นแบบที่ Module 5 กำหนดไว้ กับ slug ของ `name` shared service ตัวเดียวกัน แต่นโยบาย collision ต่างกันโดยตั้งใจสองแบบ เพราะ collision ของชื่อโพสต์กับ collision ของชื่อ tag มีความหมายไม่เหมือนกัน
+
+การดึง `excerpt` อัตโนมัติเมื่อผู้เรียกไม่ได้ส่งมาให้ ปิดช่องว่างเล็ก ๆ ที่ `CreatePostInput` เปิดทิ้งไว้ตั้งแต่ Module 5: `excerpt` เป็น `{ nullable: true }` ทั้งบน input และ GraphQL type `Post` ตรงกับ `Post.excerpt?: string` ใน [Schemas](/devblog/th/data-modeling/schemas/) เป๊ะ — แต่จนถึงตอนนี้ การไม่ใส่ `excerpt` ก็แค่ค้างเป็น `undefined` และหน้า list view ก็ไม่มีอะไรให้แสดง `deriveExcerpt` ตัดอักขระ Markdown กลุ่มที่มักโผล่ในประโยคแรกของโพสต์ออก (`#`, `*`, `_`, `` ` ``, `>`, `[`, `]`, `!`) ยุบช่องว่างให้เหลือช่องเดียว แล้วตัดที่ 160 ตัวอักษร — ขนาดที่พอดีกับ snippet ผลการค้นหาหรือ Open Graph description โดยไม่ต้องใช้ Markdown parser จริงสำหรับค่าที่ไม่มีใครคาดหวังให้เป๊ะระดับพิกเซล
+
+กฎการตรวจสอบสองข้อที่มีอยู่แล้วบน `CreatePostInput` ตั้งแต่ Module 5 คุ้มค่าที่จะเอ่ยถึงชัด ๆ ตอนนี้ที่ `SlugService` พึ่งพาความสมเหตุสมผลของ input พวกนั้น:
+
+```ts
+@Field()
+@IsString()
+@MinLength(3)
+title: string;
+
+@Field()
+@IsString()
+@MinLength(1)
+body: string;
+```
+
+`@MinLength(3)` ของ `title` ปฏิเสธชื่อยาวหนึ่งหรือสองตัวอักษรก่อนที่มันจะไปถึง `slugify()` เลย — slug ที่คู่ควรจะ index ต้องมีมากกว่าเศษคำเดียว และชื่อที่สั้นเกินกว่าจะ slugify ได้อย่างมีความหมายก็สั้นเกินกว่าจะมีประโยชน์ใน list view หรือ social preview ด้วยเช่นกัน `@MinLength(1)` ของ `body` รับประกันแค่ว่า *มี* เนื้อหาอยู่บ้าง — ไม่ใช่จำนวนคำ ไม่ใช่เวลาอ่านขั้นต่ำ — เพราะ [Draft → published](/devblog/th/content-workflow/draft-publish/) คือสิ่งที่ทำให้ผู้เขียนบันทึกโพสต์ที่ยังไม่เสร็จเป็น draft ได้จริง ๆ กฎความยาว body ที่เข้มงวดกว่านี้จะขัดกับ workflow นั้นแทนที่จะสนับสนุนมัน
+
+## Pros & cons
+
+**slug ที่แก้ไขได้ (สร้างใหม่ทุกครั้งที่ `title` เปลี่ยน) เทียบกับ slug ที่ถูกแช่แข็งตอนสร้าง** `PostsService.update` สร้าง `slug` ใหม่ทุกครั้งที่ `input.title` มีค่า โดยใช้ `SlugService.generateUnique` เดียวกันกับที่ `create` ใช้ — ชื่อที่พิมพ์ผิดแล้วแก้ไข จะสะท้อนไปที่ URL ด้วย และการเช็ค collision ก็ตัด `_id` ของโพสต์เองออกไป ทำให้การเปลี่ยนชื่อกลับไปเป็นชื่อที่เคยผลิต slug ปัจจุบันของโพสต์นี้แล้ว ไม่ชนกับตัวเองแบบผิดพลาด ต้นทุนที่ต้องจ่ายเป็นเรื่องจริง: ใครก็ตามที่ bookmark หรือแชร์ URL เก่าไว้จะได้ `404` จาก `findBySlug` โดยไม่มี redirect slug ที่แช่แข็งตอนสร้างจะเลี่ยงเรื่องนี้ได้ทั้งหมด แลกกับ URL ที่ผิดถาวรถ้าชื่อมีคำผิดที่ควรแก้ DevBlog เลือกฝั่งที่แก้ไขได้ของ trade-off นี้ — URL ที่ผิดแต่ไม่มีวันพังยังแย่กว่า URL ที่ถูกต้องซึ่งอาจ redirect ไปไม่ถึงไหนสักครั้ง บล็อกจริงในโปรดักชันคงจะจับคู่ slug ที่แก้ไขได้กับตาราง redirect เล็ก ๆ (`oldSlug → postId`) เพื่อได้ทั้งสองอย่าง ซึ่งคอร์สนี้ไม่ได้เพิ่มเข้าไป
+
+**suffix ตามลำดับ (`-2`, `-3`, …) เทียบกับ suffix แบบสุ่ม (เช่น id สั้น ๆ)** loop `while (await exists(candidate))` ของ `generateUnique` เสียเวลาไปกลับฐานข้อมูลเพิ่มหนึ่งครั้งต่อ collision จริงหนึ่งครั้ง — ไม่มีนัยสำคัญสำหรับบล็อกที่มักมีผู้เขียนคนเดียว ที่โพสต์สองอันชื่อซ้ำกันเป็นเรื่องหายาก และ `hello-devblog-2` ที่ได้ก็ยังอ่านออกและเดาได้ suffix แบบสุ่ม (`hello-devblog-x7q2`) จบได้ในการเรียก predicate เดียวไม่ว่าจะชนกันกี่ครั้ง แต่ให้ URL ที่ดูเหมือนพังทันทีที่มนุษย์อ่านมัน สำหรับเนื้อหาที่ตั้งใจจะแชร์และจดจำ ความอ่านง่ายชนะ trade-off ที่ DevBlog เลือกตรงนี้
+
+## Set it up
+
+ติดตั้ง `slugify` ในโปรเจกต์ devblog API:
+
+```bash
+npm install slugify
+```
+
+สร้าง `apps/api/src/common/slug.service.ts`:
+
+```ts
+import { Injectable } from '@nestjs/common';
+import slugify from 'slugify';
+
+@Injectable()
+export class SlugService {
+  async generateUnique(
+    base: string,
+    exists: (slug: string) => Promise<boolean>,
+  ): Promise<string> {
+    const root = slugify(base, { lower: true, strict: true });
+    let candidate = root;
+    let suffix = 2;
+
+    while (await exists(candidate)) {
+      candidate = `${root}-${suffix}`;
+      suffix += 1;
+    }
+
+    return candidate;
+  }
+}
+```
+
+สร้าง `apps/api/src/common/common.module.ts`:
+
+```ts
+import { Module } from '@nestjs/common';
+import { SlugService } from './slug.service';
+
+@Module({
+  providers: [SlugService],
+  exports: [SlugService],
+})
+export class CommonModule {}
+```
+
+Module 5 ทิ้ง `PostsService.create` ไว้พร้อม placeholder แบบ inline:
+
+```ts
+// BEFORE — apps/api/src/posts/posts.service.ts
+async create(authorId: string, input: CreatePostInput): Promise<PostDocument> {
+  // TODO(Content Workflow): a real slugify() with collision handling lands in
+  // /devblog/en/content-workflow/ — this inline placeholder just keeps `create`
+  // runnable until then.
+  const slug = input.title
+    .toLowerCase()
+    .trim()
+    .replace(/[^a-z0-9]+/g, '-')
+    .replace(/(^-|-$)/g, '');
+  const created = new this.postModel({ ...input, slug, author: authorId });
+  return created.save();
+}
+```
+
+อัปเดต `apps/api/src/posts/posts.service.ts` ให้เป็นของจริง — inject `SlugService` เชื่อมมันเข้ากับทั้ง `create` และ `update` แล้วเพิ่ม `deriveExcerpt`:
+
+```ts
+// AFTER — apps/api/src/posts/posts.service.ts
+import { Injectable, NotFoundException } from '@nestjs/common';
+import { InjectModel } from '@nestjs/mongoose';
+import { Model } from 'mongoose';
+import { Post, PostDocument } from './schemas/post.schema';
+import { PostStatus } from './enums/post-status.enum';
+import { CreatePostInput } from './dto/create-post.input';
+import { UpdatePostInput } from './dto/update-post.input';
+import { SlugService } from '../common/slug.service';
+
+export interface FindPostsPageOptions {
+  status?: PostStatus;
+  tag?: string;
+  page?: number;
+  pageSize?: number;
+}
+
+export interface PostsPageResult {
+  items: PostDocument[];
+  total: number;
+  page: number;
+  pageSize: number;
+}
+
+@Injectable()
+export class PostsService {
+  constructor(
+    @InjectModel(Post.name) private readonly postModel: Model<PostDocument>,
+    private readonly slugService: SlugService,
+  ) {}
+
+  async create(authorId: string, input: CreatePostInput): Promise<PostDocument> {
+    const slug = await this.slugService.generateUnique(input.title, (candidate) =>
+      this.postModel.exists({ slug: candidate }).exec().then(Boolean),
+    );
+    const excerpt = input.excerpt ?? this.deriveExcerpt(input.body);
+
+    const created = new this.postModel({ ...input, slug, excerpt, author: authorId });
+    return created.save();
+  }
+
+  async findPage(options: FindPostsPageOptions = {}): Promise<PostsPageResult> {
+    const { status, tag, page = 1, pageSize = 10 } = options;
+    const filter: Record<string, unknown> = {};
+    if (status) {
+      filter.status = status;
+    }
+    if (tag) {
+      filter.tags = tag;
+    }
+
+    const skip = (page - 1) * pageSize;
+    const [items, total] = await Promise.all([
+      this.postModel.find(filter).sort({ createdAt: -1 }).skip(skip).limit(pageSize).exec(),
+      this.postModel.countDocuments(filter).exec(),
+    ]);
+
+    return { items, total, page, pageSize };
+  }
+
+  findBySlug(slug: string): Promise<PostDocument | null> {
+    return this.postModel.findOne({ slug }).exec();
+  }
+
+  findById(id: string): Promise<PostDocument | null> {
+    return this.postModel.findById(id).exec();
+  }
+
+  async update(id: string, input: UpdatePostInput): Promise<PostDocument> {
+    const patch: Partial<UpdatePostInput> & { slug?: string; excerpt?: string } = { ...input };
+
+    if (input.title) {
+      patch.slug = await this.slugService.generateUnique(input.title, (candidate) =>
+        this.postModel.exists({ slug: candidate, _id: { $ne: id } }).exec().then(Boolean),
+      );
+    }
+    if (input.body && !input.excerpt) {
+      patch.excerpt = this.deriveExcerpt(input.body);
+    }
+
+    const updated = await this.postModel.findByIdAndUpdate(id, patch, { new: true }).exec();
+    if (!updated) {
+      throw new NotFoundException('Post not found');
+    }
+    return updated;
+  }
+
+  async remove(id: string): Promise<PostDocument> {
+    const removed = await this.postModel.findByIdAndDelete(id).exec();
+    if (!removed) {
+      throw new NotFoundException('Post not found');
+    }
+    return removed;
+  }
+
+  async publish(id: string): Promise<PostDocument> {
+    const published = await this.postModel
+      .findByIdAndUpdate(id, { status: PostStatus.PUBLISHED, publishedAt: new Date() }, { new: true })
+      .exec();
+    if (!published) {
+      throw new NotFoundException('Post not found');
+    }
+    return published;
+  }
+
+  private deriveExcerpt(body: string): string {
+    const plain = body
+      .replace(/[#*_`>[\]!]/g, '')
+      .replace(/\s+/g, ' ')
+      .trim();
+
+    return plain.length <= 160 ? plain : `${plain.slice(0, 160).trimEnd()}...`;
+  }
+}
+```
+
+Module 5 ทิ้ง placeholder ที่เหมือนกันไว้ใน `TagsService.create`:
+
+```ts
+// BEFORE — apps/api/src/tags/tags.service.ts
+async create(name: string): Promise<TagDocument> {
+  // TODO(Content Workflow): a shared slugify() util replaces this inline copy —
+  // see the identical placeholder in PostsService.create.
+  const slug = name
+    .toLowerCase()
+    .trim()
+    .replace(/[^a-z0-9]+/g, '-')
+    .replace(/(^-|-$)/g, '');
+
+  const existing = await this.tagModel.findOne({ slug }).exec();
+  if (existing) {
+    throw new ConflictException(`Tag "${name}" already exists`);
+  }
+
+  const created = new this.tagModel({ name, slug });
+  return created.save();
+}
+```
+
+อัปเดต `apps/api/src/tags/tags.service.ts` ให้ใช้ `SlugService` — พร้อม predicate `exists` แบบ `false` เสมอที่อธิบายไว้ข้างบน เพื่อให้พฤติกรรม `409` ที่ [Tags resolver](/devblog/th/graphql-api/tags-resolver/) verify ไว้แล้วยังคงเหมือนเดิมทุกประการ:
+
+```ts
+// AFTER — apps/api/src/tags/tags.service.ts
+import { ConflictException, Injectable } from '@nestjs/common';
+import { InjectModel } from '@nestjs/mongoose';
+import { Model } from 'mongoose';
+import { Tag, TagDocument } from './schemas/tag.schema';
+import { SlugService } from '../common/slug.service';
+
+@Injectable()
+export class TagsService {
+  constructor(
+    @InjectModel(Tag.name) private readonly tagModel: Model<TagDocument>,
+    private readonly slugService: SlugService,
+  ) {}
+
+  findAll(): Promise<TagDocument[]> {
+    return this.tagModel.find().sort({ name: 1 }).exec();
+  }
+
+  async create(name: string): Promise<TagDocument> {
+    const slug = await this.slugService.generateUnique(name, () => Promise.resolve(false));
+
+    const existing = await this.tagModel.findOne({ slug }).exec();
+    if (existing) {
+      throw new ConflictException(`Tag "${name}" already exists`);
+    }
+
+    const created = new this.tagModel({ name, slug });
+    return created.save();
+  }
+}
+```
+
+Import `CommonModule` เข้าไปในทั้งสอง feature module อัปเดต `apps/api/src/posts/posts.module.ts`:
+
+```ts
+import { Module } from '@nestjs/common';
+import { MongooseModule } from '@nestjs/mongoose';
+import { Post, PostSchema } from './schemas/post.schema';
+import { PostsService } from './posts.service';
+import { PostsResolver } from './posts.resolver';
+import { UsersModule } from '../users/users.module';
+import { CommonModule } from '../common/common.module';
+
+@Module({
+  imports: [
+    MongooseModule.forFeature([{ name: Post.name, schema: PostSchema }]),
+    UsersModule,
+    CommonModule,
+  ],
+  providers: [PostsService, PostsResolver],
+})
+export class PostsModule {}
+```
+
+อัปเดต `apps/api/src/tags/tags.module.ts`:
+
+```ts
+import { Module } from '@nestjs/common';
+import { MongooseModule } from '@nestjs/mongoose';
+import { Tag, TagSchema } from './schemas/tag.schema';
+import { TagsService } from './tags.service';
+import { TagsResolver } from './tags.resolver';
+import { CommonModule } from '../common/common.module';
+
+@Module({
+  imports: [
+    MongooseModule.forFeature([{ name: Tag.name, schema: TagSchema }]),
+    CommonModule,
+  ],
+  providers: [TagsService, TagsResolver],
+})
+export class TagsModule {}
+```
+
+- **`SlugService.generateUnique`** รับ predicate สำหรับเช็ค collision เป็น parameter แทนที่จะรับ Mongoose model — มันไม่รู้ด้วยซ้ำว่า `Post` หรือ `Tag` คืออะไร และก็ไม่จำเป็นต้องรู้ นี่คือเหตุผลที่มันอยู่ใน `common/` แทนที่จะอยู่ใน `posts/` หรือ `tags/`
+- **`postModel.exists({ slug: candidate, _id: { $ne: id } })`** ใน `update` ตัดโพสต์ที่กำลังแก้ไขออกจากการเช็ค collision ของตัวมันเอง — ถ้าไม่มี `_id: { $ne: id }` การบันทึกโพสต์โดยไม่เปลี่ยนชื่อ (ซึ่งไม่เปลี่ยน slug ที่มาจากชื่อ) จะเจอ "โพสต์ที่มี slug นี้อยู่แล้ว" (ตัวมันเอง) ทุกครั้ง แล้วต่อ `-2` เข้าไปโดยไม่จำเป็น
+- **predicate `() => Promise.resolve(false)`** ของ `TagsService.create` คือบรรทัดเดียวที่ดูแปลกเมื่อมองแยกส่วน — มันคือสิ่งที่ทำให้ `generateUnique` ลดรูปเหลือแค่การเรียก `slugify()` ธรรมดา โดยตั้งใจ ตามที่อธิบายไว้ในหัวข้อ "Why" ด้านบน
+
+## Verify
+
+```bash
+npm run start:dev
+```
+
+พร้อม header `Authorization` จาก mutation `login`/`register` ใน Sandbox รัน `createPost` ด้วยชื่อเดียวกับที่ [Posts resolver](/devblog/th/graphql-api/posts-resolver/)'s Verify section ใช้ไปแล้วครั้งหนึ่ง คือ `"Hello, DevBlog"`:
+
+```graphql
+mutation CreatePostAgain {
+  createPost(input: { title: "Hello, DevBlog", body: "Second post, same title." }) {
+    slug
+    excerpt
+  }
+}
+```
+
+```txt
+{
+  "data": {
+    "createPost": {
+      "slug": "hello-devblog-2",
+      "excerpt": "Second post, same title."
+    }
+  }
+}
+```
+
+`slug` ที่ได้กลับมาคือ `hello-devblog-2` ไม่ใช่ duplicate-key error — suffix loop ของ `SlugService.generateUnique` ดักจับ collision กับโพสต์ที่สร้างไว้แล้วใน Verify section ของ Module 5 ได้ `excerpt` ที่ได้กลับมาเท่ากับ `body` เป๊ะในกรณีนี้ เพราะ string ทั้งหมดสั้นกว่า 160 ตัวอักษร ลองใช้ `body` ที่ยาวกว่านั้นดู แล้ว `excerpt` จะถูกตัดพร้อม `...` ต่อท้าย แม้ mutation นี้จะไม่เคยตั้งค่า `excerpt` เองเลยก็ตาม
+
+รัน `createTag` ด้วยชื่อเดียวกันสองครั้ง:
+
+```graphql
+mutation CreateTagTwice {
+  createTag(name: "NestJS") {
+    slug
+  }
+}
+```
+
+การเรียกครั้งที่สองยังคงล้มเหลวด้วย `409 ConflictException` เดิมจาก [Tags resolver](/devblog/th/graphql-api/tags-resolver/) — ยืนยันว่านโยบายชื่อซ้ำของ `TagsService.create` ไม่ได้เปลี่ยนไปเลย แม้ตอนนี้มันจะผ่าน `SlugService` แล้วก็ตาม สุดท้าย ลอง `updatePost` โพสต์ที่มีอยู่ด้วย `title` ที่แก้ไขแล้ว แล้วยืนยันว่า `slug` ของมันเปลี่ยนตาม ส่วนการ `updatePost` โพสต์เดิมซ้ำอีกครั้งโดยไม่เปลี่ยน `title` จะปล่อยให้ slug เหมือนเดิมทุกประการ (ไม่มี `-2` ที่ไม่จำเป็นจาก filter การยกเว้น)
+
+## Recap
+
+`SlugService.generateUnique` เป็น helper จัดการ collision เล็ก ๆ ที่ไม่ผูกกับ model ใดโดยเฉพาะ ใช้ร่วมกันผ่าน `CommonModule` โดย `PostsService` (auto-suffix เมื่อชื่อชนกันจริง) และ `TagsService` (เลือกที่จะไม่ auto-suffix โดยตั้งใจ คงนโยบาย `409` เดิมไว้) ทั้งสอง service แทนที่ placeholder แบบ inline ที่เหมือนกันซึ่ง Module 5 ทิ้งไว้ `PostsService` ยังดึง `excerpt` จาก `body` เมื่อผู้เรียกไม่ได้ส่งมาให้ด้วย และกฎการตรวจสอบ `title`/`body` ที่มีอยู่แล้วบน `CreatePostInput` ตอนนี้ก็มีเหตุผลที่บันทึกไว้ชัดเจนว่าทำไมมันถึงมีอยู่ มากกว่าแค่ "class-validator ต้องการอะไรสักอย่าง"
+
+Next: [Draft → published →](/devblog/th/content-workflow/draft-publish/)

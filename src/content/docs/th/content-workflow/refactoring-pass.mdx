@@ -1,0 +1,407 @@
+---
+title: Refactoring pass
+description: "การ refactor ที่คงพฤติกรรมเดิมไว้ทั้งหมด: แยก ExcerptService, กำจัดความซ้ำซ้อนใน create/update ที่การเชื่อม SlugService สร้างขึ้น และย้ายการตัดสินใจเรื่องสิทธิ์เข้าถึง draft ออกจาก resolver กลับไปที่ PostsService"
+sidebar:
+  order: 3
+---
+
+## What we're building
+
+ไม่มีฟีเจอร์ใหม่ — มีแต่การ refactor [Slugs & validation](/devblog/th/content-workflow/slugs-validation/) และ [Draft → published](/devblog/th/content-workflow/draft-publish/) ต่างก็ส่งมอบโค้ดที่ใช้งานได้จริงแล้ว แต่ทั้งคู่ก็ทิ้งอะไรบางอย่างไว้ข้างหลัง: `PostsService.create`/`update` ตอนนี้คำนวณ slug-กับ-excerpt ซ้ำกัน ตรรกะ excerpt เองก็เป็น private method ที่ยัดอยู่ใน service ที่ยังเป็นเจ้าของ Mongoose query ด้วย และ `PostsResolver.posts` ก็ถือการตัดสินใจด้าน access-control จริงแทนที่จะส่งต่อมันไป บทเรียนนี้แยก `apps/api/src/common/excerpt.service.ts` (`ExcerptService`) ออกมา ยุบความซ้ำซ้อนใน `PostsService` ให้อยู่หลัง private helper ตัวเดียว และย้ายการตัดสินใจเรื่องสิทธิ์เข้าถึง draft กลับไปที่ `PostsService.findPage` — โดยพฤติกรรมภายนอกเหมือนเดิมทุกประการ ยืนยันได้ด้วยการรัน Verify section ของสองบทเรียนก่อนหน้าซ้ำโดยไม่เปลี่ยนอะไรเลย
+
+## Why
+
+การ refactor ในความหมายของ Fowler คือการเปลี่ยนโครงสร้างภายในของโปรแกรมโดยไม่เปลี่ยนสิ่งที่มันทำ — ทุก request ที่คอร์สนี้ verify ไว้แล้วต้องยังคงให้ response เดิมทุกประการหลังจากนี้ วิธีนี้จะใช้ได้ก็ต่อเมื่อมีอะไรให้เช็คเทียบ ซึ่งเป็นเหตุผลที่ [การ refactor แบบมี test คุ้มกัน](https://en.wikipedia.org/wiki/Code_refactoring) โดยเจตนา (แม้จะยังไม่มี automated suite — [Testing](/devblog/th/testing/) เป็น module ที่จะมาทีหลัง) หมายถึงการรัน Verify ซ้ำ ไม่ใช่แค่อ่าน diff
+
+สาม smell ที่สะสมมาตลอดสองบทเรียนที่ผ่านมา แต่ละอันคุ้มค่าที่จะเรียกชื่อให้ชัดเจน แทนที่จะบอกแค่ว่า "โค้ดรกขึ้น":
+
+1. **ความซ้ำซ้อน (Duplication)** `create` และ `update` ต่างก็คำนวณ slug ที่ไม่ซ้ำผ่าน `SlugService.generateUnique` และต่างก็ดึง excerpt ผ่านการตัดที่ 160 ตัวอักษรแบบเดียวกัน — ตรรกะที่แทบจะเหมือนกันเป๊ะ เขียนไว้สองครั้ง ต่างกันแค่ filter การยกเว้นใน collision predicate จุดเรียกที่สามในอนาคต (เช่น mutation สำหรับ bulk-import) ก็จะคัดลอกมันไปเป็นครั้งที่สาม หรือมีแนวโน้มมากกว่าคือคัดลอกมันมาผิดนิดหน่อย
+2. **private method ที่ไม่ควรอยู่ในคลาสนั้น** `deriveExcerpt` ไม่มีอะไรเกี่ยวข้องกับ Mongoose, `PostDocument` หรือ persistence เลย — มันเป็นการแปลง string ล้วน ๆ ที่บังเอิญอยู่ใน `PostsService` เพราะเป็นที่แรกที่ต้องการมัน [Slugs & validation](/devblog/th/content-workflow/slugs-validation/) แยกตรรกะ slug ที่เทียบเท่ากันออกไปเป็น `SlugService` ของตัวเองไปแล้ว การปล่อยให้การดึง excerpt ยังเป็น private method อยู่จึงเป็นความไม่สอดคล้องกัน ไม่ใช่ปัญหาที่เล็กกว่า
+3. **resolver ที่ตัดสินใจเอง ไม่ใช่แค่ส่งต่อการตัดสินใจ** [Draft → published](/devblog/th/content-workflow/draft-publish/) ใส่ branch ทั้งหมดของ "นี่คือ draft request หรือเปล่า ถ้าใช่ ผู้เรียกคนนี้มีสิทธิ์ทำแบบนั้นไหม" ไว้ใน `PostsResolver.posts` โดยตรง — ตรรกะแบบเดียวกับที่ convention ของคอร์สนี้เอง (ทุก module ก่อนหน้า) กันออกจาก resolver เสมอ method อื่น ๆ ของ `PostsResolver` เป็นการส่งต่อบรรทัดเดียวไปยัง `PostsService` ทั้งหมด มีแต่ `posts` เท่านั้นที่กลายเป็นข้อยกเว้น
+
+ทั้งสามข้อนี้ไม่ได้ผิดในแง่ที่ให้ผลลัพธ์ไม่ถูกต้อง — Verify section ของ [Draft → published](/devblog/th/content-workflow/draft-publish/) ผ่านแล้ว มันผิดในแง่ที่บทเรียนถัดไปที่จะแตะโค้ดส่วนนี้ต้องจ่ายภาษีที่เพิ่มขึ้นเรื่อย ๆ: จุดซ้ำซ้อนที่สองที่ต้องคอยให้ตรงกัน service ที่ปนสองความรับผิดชอบที่ไม่เกี่ยวกันเข้าด้วยกัน resolver ที่ไม่ปลอดภัยอีกต่อไปที่จะสันนิษฐานว่าเป็นแค่ "ท่อส่งข้อมูล"
+
+## Pros & cons
+
+**Refactor ตอนนี้ กลาง module เทียบกับการเลื่อนออกไปจนกว่าจุดเรียกที่สามจะต้องการตรรกะที่ซ้ำจริง ๆ** การแยก `ExcerptService` และยุบ `create`/`update` เข้าด้วยกัน กินเวลาบทเรียนจริงบนโค้ดที่ใช้งานได้อยู่แล้ว และแตะไฟล์ที่ไม่มีใครขอให้เปลี่ยนอีก ทางเลือกอื่น — ปล่อยให้ความซ้ำซ้อนอยู่ตรงนั้นจนกว่าผู้เรียกคนที่สามที่แท้จริงจะโผล่มา แล้วค่อยแยกตอนนั้น — คือเหตุผลแบบตำรา "rule of three" ที่ไม่ควร abstract ก่อนเวลาอันควร DevBlog เลือก refactor ตั้งแต่ตอนนี้โดยเฉพาะเพราะความซ้ำซ้อนมีอยู่แล้วสองจุดเรียก *และ* ไม่สอดคล้องกับการแยก `SlugService` ที่เป็นพี่น้องกันอยู่แล้วด้วย การรอจุดที่สามมาพิสูจน์ความจำเป็นของ `ExcerptService` จะปล่อยให้ `deriveExcerpt` กับ `SlugService` นั่งอยู่ข้าง ๆ กันในไฟล์เดียวกัน ดูเหมือนปรัชญาการออกแบบสองแบบที่ต่างกัน ซึ่งเป็นสัญญาณที่แย่กว่าสำหรับผู้อ่านมากกว่าการจ่ายต้นทุนการแยกตอนนี้ ความซ้ำซ้อนเล็ก ๆ ที่มีจุดเรียกเดียวในที่อื่นของ codebase นี้จะเป็นตัวอย่างที่ดีที่ควรปล่อยไว้จนกว่ามันจะเกิดซ้ำจริง ๆ
+
+## Set it up
+
+**Extract Class/Service** `deriveExcerpt` ย้ายออกจาก `PostsService` ไปเป็น injectable ของตัวเอง มีรูปทรงเหมือน `SlugService` เป๊ะ สร้าง `apps/api/src/common/excerpt.service.ts`:
+
+```ts
+import { Injectable } from '@nestjs/common';
+
+@Injectable()
+export class ExcerptService {
+  derive(body: string): string {
+    const plain = body
+      .replace(/[#*_`>[\]!]/g, '')
+      .replace(/\s+/g, ' ')
+      .trim();
+
+    return plain.length <= 160 ? plain : `${plain.slice(0, 160).trimEnd()}...`;
+  }
+}
+```
+
+อัปเดต `apps/api/src/common/common.module.ts` ให้ provide และ export มันควบคู่กับ `SlugService`:
+
+```ts
+import { Module } from '@nestjs/common';
+import { SlugService } from './slug.service';
+import { ExcerptService } from './excerpt.service';
+
+@Module({
+  providers: [SlugService, ExcerptService],
+  exports: [SlugService, ExcerptService],
+})
+export class CommonModule {}
+```
+
+**Remove Duplication ผ่าน Extract Method** ก่อนบทเรียนนี้ `create` และ `update` ต่างก็รัน block slug-กับ-excerpt ของตัวเอง:
+
+```ts
+// BEFORE — apps/api/src/posts/posts.service.ts
+async create(authorId: string, input: CreatePostInput): Promise<PostDocument> {
+  const slug = await this.slugService.generateUnique(input.title, (candidate) =>
+    this.postModel.exists({ slug: candidate }).exec().then(Boolean),
+  );
+  const excerpt = input.excerpt ?? this.deriveExcerpt(input.body);
+
+  const created = new this.postModel({ ...input, slug, excerpt, author: authorId });
+  return created.save();
+}
+
+async update(id: string, input: UpdatePostInput): Promise<PostDocument> {
+  const patch: Partial<UpdatePostInput> & { slug?: string; excerpt?: string } = { ...input };
+
+  if (input.title) {
+    patch.slug = await this.slugService.generateUnique(input.title, (candidate) =>
+      this.postModel.exists({ slug: candidate, _id: { $ne: id } }).exec().then(Boolean),
+    );
+  }
+  if (input.body && !input.excerpt) {
+    patch.excerpt = this.deriveExcerpt(input.body);
+  }
+
+  const updated = await this.postModel.findByIdAndUpdate(id, patch, { new: true }).exec();
+  if (!updated) {
+    throw new NotFoundException('Post not found');
+  }
+  return updated;
+}
+
+private deriveExcerpt(body: string): string {
+  const plain = body
+    .replace(/[#*_`>[\]!]/g, '')
+    .replace(/\s+/g, ' ')
+    .trim();
+
+  return plain.length <= 160 ? plain : `${plain.slice(0, 160).trimEnd()}...`;
+}
+```
+
+ทั้งสอง block คำนวณสอง field เดียวกัน ต่างกันแค่ว่าการเช็ค collision ของ slug ยกเว้น `_id` ของโพสต์เองหรือไม่ private `applyContentFields` ตัวเดียวแทนที่ทั้งสองอัน โดยเขียนผลลัพธ์ลงบน object ธรรมดาที่ `create`/`update` ค่อย merge ทับ `input` ด้วย spread — เป็น mapper เล็ก ๆ ที่ความซ้ำซ้อนนี้ต้องการ โดยไม่ต้องมีคลาสใหม่ทั้งคลาสสำหรับสอง field:
+
+```ts
+// AFTER — apps/api/src/posts/posts.service.ts
+async create(authorId: string, input: CreatePostInput): Promise<PostDocument> {
+  const fields: Partial<Post> = {};
+  await this.applyContentFields(fields, input);
+
+  const created = new this.postModel({ ...input, ...fields, author: authorId });
+  return created.save();
+}
+
+async update(id: string, input: UpdatePostInput): Promise<PostDocument> {
+  const fields: Partial<Post> = {};
+  await this.applyContentFields(fields, input, id);
+
+  const updated = await this.postModel
+    .findByIdAndUpdate(id, { ...input, ...fields }, { new: true })
+    .exec();
+  if (!updated) {
+    throw new NotFoundException('Post not found');
+  }
+  return updated;
+}
+
+private async applyContentFields(
+  target: Partial<Post>,
+  input: CreatePostInput | UpdatePostInput,
+  excludeId?: string,
+): Promise<void> {
+  if (input.title) {
+    target.slug = await this.slugService.generateUnique(input.title, (candidate) =>
+      this.postModel
+        .exists({ slug: candidate, ...(excludeId ? { _id: { $ne: excludeId } } : {}) })
+        .exec()
+        .then(Boolean),
+    );
+  }
+  if (input.body && !input.excerpt) {
+    target.excerpt = this.excerptService.derive(input.body);
+  }
+}
+```
+
+การมีหรือไม่มี `excludeId` คือความแตกต่างจริงหนึ่งเดียวระหว่าง create กับ update — clause `_id: { $ne: excludeId }` ของการเช็ค collision — เขียนไว้ครั้งเดียวเป็น conditional spread แทนที่จะเป็น predicate closure สองอันที่เขียนแยกกัน
+
+**Move Method** [Draft → published](/devblog/th/content-workflow/draft-publish/) ทิ้งการตัดสินใจเรื่องสิทธิ์เข้าถึง draft ไว้ใน `PostsResolver.posts` มันย้ายเข้าไปที่ `PostsService.findPage` ซึ่งตอนนี้รับผู้เรียกโดยตรงแทนที่จะรับค่าที่คำนวณไว้ล่วงหน้าสองค่า:
+
+```ts
+// BEFORE — apps/api/src/posts/posts.resolver.ts (the decision lived here)
+posts(
+  @Args('status', { type: () => PostStatus, nullable: true }) status?: PostStatus,
+  @Args('tag', { type: () => String, nullable: true }) tag?: string,
+  @Args('page', { type: () => Int, nullable: true }) page?: number,
+  @Args('pageSize', { type: () => Int, nullable: true }) pageSize?: number,
+  @CurrentUser() currentUser?: AuthenticatedUser,
+): Promise<PostsPageResult> {
+  let effectiveStatus = status;
+  let authorFilter: string | undefined;
+
+  if (status === PostStatus.DRAFT) {
+    if (!currentUser) {
+      throw new ForbiddenException('Sign in to view drafts');
+    }
+    if (currentUser.role !== 'admin') {
+      authorFilter = currentUser.userId;
+    }
+  } else if (!status) {
+    effectiveStatus = PostStatus.PUBLISHED;
+  }
+
+  return this.postsService.findPage({ status: effectiveStatus, tag, page, pageSize, authorFilter });
+}
+```
+
+**Replace Temp with Query** การอัปเดต `findPage` เดียวกันนี้ยังแทนที่สิ่งที่ปกติจะเป็น temp `const isDraftRequest = status === PostStatus.DRAFT` ที่คำนวณครั้งเดียวแล้วอ่านสองครั้ง ด้วย private query method ที่ถูกเรียกในแต่ละจุดที่ใช้แทน:
+
+```ts
+// AFTER — apps/api/src/posts/posts.service.ts
+export interface FindPostsPageOptions {
+  status?: PostStatus;
+  tag?: string;
+  page?: number;
+  pageSize?: number;
+  requestingUser?: AuthenticatedUser;
+}
+
+async findPage(options: FindPostsPageOptions = {}): Promise<PostsPageResult> {
+  const { status, tag, page = 1, pageSize = 10, requestingUser } = options;
+  const filter: Record<string, unknown> = {};
+
+  if (this.isDraftRequest(status)) {
+    if (!requestingUser) {
+      throw new ForbiddenException('Sign in to view drafts');
+    }
+    filter.status = PostStatus.DRAFT;
+    if (requestingUser.role !== 'admin') {
+      filter.author = requestingUser.userId;
+    }
+  } else {
+    filter.status = status ?? PostStatus.PUBLISHED;
+  }
+
+  if (tag) {
+    filter.tags = tag;
+  }
+
+  const skip = (page - 1) * pageSize;
+  const [items, total] = await Promise.all([
+    this.postModel.find(filter).sort({ createdAt: -1 }).skip(skip).limit(pageSize).exec(),
+    this.postModel.countDocuments(filter).exec(),
+  ]);
+
+  return { items, total, page, pageSize };
+}
+
+private isDraftRequest(status?: PostStatus): boolean {
+  return status === PostStatus.DRAFT;
+}
+```
+
+`PostsResolver.posts` หดกลับมาเป็นการส่งต่อบรรทัดเดียวแบบเดียวกับที่ method อื่น ๆ ของ resolver นี้เป็นอยู่แล้ว:
+
+```ts
+// AFTER — apps/api/src/posts/posts.resolver.ts
+@Query(() => PostPage)
+@UseGuards(OptionalGqlAuthGuard)
+posts(
+  @Args('status', { type: () => PostStatus, nullable: true }) status?: PostStatus,
+  @Args('tag', { type: () => String, nullable: true }) tag?: string,
+  @Args('page', { type: () => Int, nullable: true }) page?: number,
+  @Args('pageSize', { type: () => Int, nullable: true }) pageSize?: number,
+  @CurrentUser() currentUser?: AuthenticatedUser,
+): Promise<PostsPageResult> {
+  return this.postsService.findPage({ status, tag, page, pageSize, requestingUser: currentUser });
+}
+```
+
+`ForbiddenException` และ temp ในเครื่อง `effectiveStatus`/`authorFilter` หลุดออกจาก `posts.resolver.ts` ไปทั้งหมด — ไม่มีอะไรตรงนั้น import `ForbiddenException` อีกต่อไป `PostsService` รับ interface `AuthenticatedUser` เล็ก ๆ แบบเดียวกับที่ `PostsResolver` และ `AuthResolver` ต่างก็ประกาศไว้เป็น private ของตัวเองอยู่แล้ว — convention ที่ตั้งไว้แล้วของ repo นี้คือ interface เล็ก ๆ ที่ซ้ำกันในแต่ละไฟล์ แทนที่จะเป็น type เดียวที่ใช้ร่วมกัน และการ refactor นี้ก็ทำตาม convention นั้น แทนที่จะนำ shared module ใหม่มาใช้กับรูปทรงสาม field
+
+`apps/api/src/posts/posts.service.ts` เวอร์ชันปัจจุบันฉบับเต็มหลังจากทั้งสามการย้าย:
+
+```ts
+import { ForbiddenException, Injectable, NotFoundException } from '@nestjs/common';
+import { InjectModel } from '@nestjs/mongoose';
+import { Model } from 'mongoose';
+import { Post, PostDocument } from './schemas/post.schema';
+import { PostStatus } from './enums/post-status.enum';
+import { CreatePostInput } from './dto/create-post.input';
+import { UpdatePostInput } from './dto/update-post.input';
+import { SlugService } from '../common/slug.service';
+import { ExcerptService } from '../common/excerpt.service';
+
+interface AuthenticatedUser {
+  userId: string;
+  email: string;
+  role: 'author' | 'admin';
+}
+
+export interface FindPostsPageOptions {
+  status?: PostStatus;
+  tag?: string;
+  page?: number;
+  pageSize?: number;
+  requestingUser?: AuthenticatedUser;
+}
+
+export interface PostsPageResult {
+  items: PostDocument[];
+  total: number;
+  page: number;
+  pageSize: number;
+}
+
+@Injectable()
+export class PostsService {
+  constructor(
+    @InjectModel(Post.name) private readonly postModel: Model<PostDocument>,
+    private readonly slugService: SlugService,
+    private readonly excerptService: ExcerptService,
+  ) {}
+
+  async create(authorId: string, input: CreatePostInput): Promise<PostDocument> {
+    const fields: Partial<Post> = {};
+    await this.applyContentFields(fields, input);
+
+    const created = new this.postModel({ ...input, ...fields, author: authorId });
+    return created.save();
+  }
+
+  async findPage(options: FindPostsPageOptions = {}): Promise<PostsPageResult> {
+    const { status, tag, page = 1, pageSize = 10, requestingUser } = options;
+    const filter: Record<string, unknown> = {};
+
+    if (this.isDraftRequest(status)) {
+      if (!requestingUser) {
+        throw new ForbiddenException('Sign in to view drafts');
+      }
+      filter.status = PostStatus.DRAFT;
+      if (requestingUser.role !== 'admin') {
+        filter.author = requestingUser.userId;
+      }
+    } else {
+      filter.status = status ?? PostStatus.PUBLISHED;
+    }
+
+    if (tag) {
+      filter.tags = tag;
+    }
+
+    const skip = (page - 1) * pageSize;
+    const [items, total] = await Promise.all([
+      this.postModel.find(filter).sort({ createdAt: -1 }).skip(skip).limit(pageSize).exec(),
+      this.postModel.countDocuments(filter).exec(),
+    ]);
+
+    return { items, total, page, pageSize };
+  }
+
+  findBySlug(slug: string): Promise<PostDocument | null> {
+    return this.postModel.findOne({ slug }).exec();
+  }
+
+  findById(id: string): Promise<PostDocument | null> {
+    return this.postModel.findById(id).exec();
+  }
+
+  async update(id: string, input: UpdatePostInput): Promise<PostDocument> {
+    const fields: Partial<Post> = {};
+    await this.applyContentFields(fields, input, id);
+
+    const updated = await this.postModel
+      .findByIdAndUpdate(id, { ...input, ...fields }, { new: true })
+      .exec();
+    if (!updated) {
+      throw new NotFoundException('Post not found');
+    }
+    return updated;
+  }
+
+  async remove(id: string): Promise<PostDocument> {
+    const removed = await this.postModel.findByIdAndDelete(id).exec();
+    if (!removed) {
+      throw new NotFoundException('Post not found');
+    }
+    return removed;
+  }
+
+  async publish(id: string): Promise<PostDocument> {
+    const published = await this.postModel
+      .findByIdAndUpdate(id, { status: PostStatus.PUBLISHED, publishedAt: new Date() }, { new: true })
+      .exec();
+    if (!published) {
+      throw new NotFoundException('Post not found');
+    }
+    return published;
+  }
+
+  private async applyContentFields(
+    target: Partial<Post>,
+    input: CreatePostInput | UpdatePostInput,
+    excludeId?: string,
+  ): Promise<void> {
+    if (input.title) {
+      target.slug = await this.slugService.generateUnique(input.title, (candidate) =>
+        this.postModel
+          .exists({ slug: candidate, ...(excludeId ? { _id: { $ne: excludeId } } : {}) })
+          .exec()
+          .then(Boolean),
+      );
+    }
+    if (input.body && !input.excerpt) {
+      target.excerpt = this.excerptService.derive(input.body);
+    }
+  }
+
+  private isDraftRequest(status?: PostStatus): boolean {
+    return status === PostStatus.DRAFT;
+  }
+}
+```
+
+`TagsService` ไม่ต้องการอะไรจากเรื่องนี้เลย — มันมีแค่ method เดียวเท่านั้นที่แตะ `SlugService` จึงไม่มีความซ้ำซ้อนให้กำจัดและไม่มีตรรกะการตัดสินใจให้ย้าย refactoring pass แตะโค้ดที่สะสม smell เท่านั้น ไม่ใช่ทุกไฟล์ที่ module หนึ่งบังเอิญสร้างขึ้นมา
+
+## Verify
+
+```bash
+npm run start:dev
+```
+
+การเช็คทุกอันด้านล่างคือ request ที่รันไปแล้วในบทเรียนก่อนหน้า ทำซ้ำเป๊ะ ๆ เพื่อยืนยันว่า refactor นี้ไม่ได้เปลี่ยนอะไรที่สังเกตเห็นได้เลย
+
+จาก [Slugs & validation](/devblog/th/content-workflow/slugs-validation/): `createPost` ด้วยชื่อ `"Hello, DevBlog"` เป็นครั้งที่สามยังคงคืน `slug: "hello-devblog-3"` และ `excerpt` ของมันก็ยังถูกดึงแบบเดิมเมื่อไม่ได้ระบุ `createTag(name: "NestJS")` ยังคงล้มเหลวด้วย `409 ConflictException` เดิมเมื่อเรียกซ้ำ
+
+จาก [Draft → published](/devblog/th/content-workflow/draft-publish/): `posts` ที่ไม่มี header `Authorization` และไม่มี argument `status` ยังคงเป็นค่าเริ่มต้น `PUBLISHED` และคืนเฉพาะโพสต์ที่ publish ไปแล้วจริง ๆ เท่านั้น `posts(status: DRAFT)` ที่ไม่มี token ยังคงล้มเหลวด้วย `403` ด้วย token ของ author ที่ใช้ได้ มันยังคงคืนเฉพาะ draft ของ author คนนั้นเท่านั้น ด้วย token ของ admin มันยังคงคืน draft ทุกอัน `publishPost` ยังคงตั้ง `status: PUBLISHED` และ `publishedAt` และโพสต์ที่มันเจาะจงยังคงปรากฏใน query `posts` แบบไม่ล็อกอินครั้งถัดไปทันที
+
+ทุกอันในนี้ให้ response เดิมทุกประการแบบที่มันให้ก่อนบทเรียนนี้ — นั่นคืองานเดียวของ refactor
+
+## Recap
+
+สามการย้ายที่มีชื่อเรียก พฤติกรรมไม่เปลี่ยนแม้แต่นิดเดียว: **Extract Class/Service** ดึง `deriveExcerpt` ออกจาก `PostsService` ไปเป็น `ExcerptService` ของตัวเอง ตรงกับตัวอย่างของ `SlugService` ที่มันเคยไม่สอดคล้องด้วย **Remove Duplication** ผ่าน **Extract Method** ยุบ block slug-กับ-excerpt ที่แทบจะเหมือนกันเป๊ะของ `create`/`update` ให้เหลือ private helper `applyContentFields` ตัวเดียว รวมกลับเข้ากับ `input` ด้วย spread แทนที่จะเป็นคลาส mapper เฉพาะ **Move Method** ย้ายการตัดสินใจเรื่องสิทธิ์เข้าถึง draft จาก `PostsResolver.posts` ไปที่ `PostsService.findPage` ซึ่งเป็นที่ที่การตัดสินใจด้านสิทธิ์เข้าถึงอื่น ๆ ทุกอันใน codebase นี้อยู่แล้ว และ **Replace Temp with Query** เปลี่ยน temp `isDraftRequest` ที่ควรจะเป็น ให้กลายเป็น private method ที่ถูกเรียกในแต่ละจุดที่ต้องการมัน `TagsService` และ method resolver อื่น ๆ ทั้งหมดไม่ถูกแตะต้องเลย เพราะไม่มีอะไรในนั้นที่สะสม smell จริง ๆ
+
+Next: [Comments →](/devblog/th/comments/)
