@@ -1,0 +1,113 @@
+---
+title: Prerequisites
+description: "The tools to install on macOS before building DevBlog — Node, a package manager, Docker Desktop, the Nest CLI, mongosh, and a GraphQL client — each with a verify command and expected output."
+sidebar:
+  order: 3
+---
+
+## What we're building
+
+Before writing a line of DevBlog, you need a working local toolchain: a Node runtime, a package manager, Docker to run the stack, the Nest CLI to scaffold the API, a MongoDB shell to inspect data, and a GraphQL client to poke the API. This lesson installs each on **macOS** and gives you a command to confirm it works, with the output you should expect.
+
+## Why
+
+Every tool here earns its place:
+
+- **Node 20+** runs both the NestJS API and the Next.js front end.
+- **npm or pnpm** installs and manages dependencies for each package.
+- **Docker Desktop** runs MongoDB, the API, and the web app together with one command — no local Mongo install required.
+- **The Nest CLI** scaffolds modules, resolvers, and services so the backend stays consistent.
+- **mongosh** lets you open the database and read the documents your API writes, which is invaluable when debugging.
+- **A GraphQL client** lets you run queries and mutations by hand before any UI exists.
+
+## Set it up
+
+Work through each tool and run its verify command. Versions will differ slightly; the shape of the output is what matters.
+
+**Node 20+** — the runtime for both apps. Install via [nvm](https://github.com/nvm-sh/nvm) (recommended) or the macOS installer, then:
+
+```bash
+node -v
+# v20.11.1
+```
+
+Any `v20.x` or newer is fine. If you see `v18` or lower, upgrade before continuing.
+
+**npm / pnpm** — the package manager. npm ships with Node; pnpm is faster and disk-efficient for a monorepo:
+
+```bash
+npm -v
+# 10.2.4
+
+# optional but recommended
+npm i -g pnpm
+pnpm -v
+# 8.15.1
+```
+
+**Docker Desktop** — runs the whole stack. Install [Docker Desktop for Mac](https://www.docker.com/products/docker-desktop/), launch it once so the engine starts, then verify both the CLI and the Compose plugin:
+
+```bash
+docker --version
+# Docker version 24.0.6, build ed223bc
+
+docker compose version
+# Docker Compose version v2.23.0
+```
+
+Note it is `docker compose` (a subcommand), not the old `docker-compose` binary. If `docker --version` errors, make sure Docker Desktop is actually running.
+
+**The Nest CLI** — scaffolds the backend. Install it globally:
+
+```bash
+npm i -g @nestjs/cli
+nest --version
+# 10.3.0
+```
+
+**mongosh** — the MongoDB shell for inspecting data. You have two options. If you install [Homebrew](https://brew.sh)'s `mongosh`:
+
+```bash
+brew install mongosh
+mongosh --version
+# 2.1.1
+```
+
+Or, once the stack is running, use the copy already inside the Mongo container — no local install needed:
+
+```bash
+docker compose exec mongo mongosh
+# Current Mongosh Log ID: ...
+# Connecting to: mongodb://127.0.0.1:27017/...
+# test>
+```
+
+**A GraphQL client** — for testing the API by hand. NestJS + Apollo serves a built-in playground at `http://localhost:3000/graphql`; opening that URL in a browser once the API is up gives you a query editor with schema-aware autocomplete:
+
+```txt
+Open http://localhost:3000/graphql
+# Apollo Sandbox / GraphQL playground loads with your schema in the Docs tab
+```
+
+You can also use the standalone [Apollo Sandbox](https://studio.apollographql.com/sandbox) and point it at the same URL. Either works.
+
+## Verify
+
+Run this checklist top to bottom; every command should print a version, not an error:
+
+```bash
+node -v            # v20+ 
+npm -v             # 10+
+docker --version   # Docker version 24+
+docker compose version   # v2+
+nest --version     # 10+
+mongosh --version  # 2+  (or use docker compose exec mongo mongosh)
+```
+
+Then open `http://localhost:3000/graphql` once the API exists (it does not yet — that comes in a later module) to confirm the GraphQL client loads. If every line above prints a version, your machine is ready.
+
+## Recap
+
+DevBlog needs Node 20+, a package manager (npm or pnpm), Docker Desktop with the Compose plugin, the Nest CLI, `mongosh` (local or via the container), and a GraphQL client (the built-in `/graphql` playground or Apollo Sandbox). Each has a one-line verify command; when they all print versions, you can move on.
+
+Next: [Roadmap →](/devblog/en/introduction/roadmap/)

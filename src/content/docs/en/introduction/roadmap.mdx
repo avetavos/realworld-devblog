@@ -1,0 +1,44 @@
+---
+title: Roadmap
+description: "Where DevBlog fits in the six-project Real-World Projects series — TaskFlow, DevBlog, ShopMicro, FitTrack, OfflineNotes, and CloudDeploy — and the stack and courses each one adapts."
+sidebar:
+  order: 4
+---
+
+## What we're building
+
+DevBlog is not a standalone tutorial. It is **project #2** of the six-project **Real-World Projects** series — a sequence where each project is a complete, deployable application that adapts several Learn Hub courses into one realistic build. This lesson places DevBlog in that series so you know what came before and what comes next.
+
+## Why
+
+Individual courses teach one thing well — a course on GraphQL, a course on Next.js, a course on MongoDB. Real applications need several of those at once, wired together with the trade-offs and glue that no single course covers. The Real-World Projects series exists to bridge that gap: each project takes a set of course topics and forces you to combine them into something that actually runs and deploys. Seeing the whole series also shows you that the skills compound — auth from one project, containers from another, testing throughout.
+
+## Set it up
+
+The series is six projects, built in order. **TaskFlow is already live**, and **DevBlog — this one — is the current project.** The rest are on the roadmap.
+
+**1 · TaskFlow ✅ (done, already live).** A task and project management app. Backend in Node/NestJS with a REST API and PostgreSQL, a React front end, and JWT auth. It adapts the Node, React, and SQL/PostgreSQL courses, and establishes the baseline patterns — modules, auth, testing — that the later projects build on.
+
+**2 · DevBlog ← you are here.** A headless CMS and public blog. Node/NestJS with **code-first GraphQL** over MongoDB, and a Next.js App Router front end doing SSR/ISR for the public site plus an authenticated admin dashboard. It adapts the Node, MongoDB, GraphQL, Next.js/React, and Docker courses, and introduces document data modelling, a typed GraphQL contract, and content/moderation workflows.
+
+**3 · ShopMicro.** An e-commerce backend built as **microservices**. Multiple Node services communicating over gRPC and a message broker, each with its own datastore, behind an API gateway. It adapts the Node, Microservices, and Message Queue courses, and introduces service decomposition, inter-service communication, and eventual consistency.
+
+**4 · FitTrack.** A fitness-tracking mobile app. A **React Native / Expo** client with offline-friendly sync against a Node backend, charts, and device APIs. It adapts the React Native and Node courses, and introduces mobile UI, local persistence, and syncing data from a device to a server.
+
+**5 · OfflineNotes.** An **offline-first** notes app. A local-first client (IndexedDB / a sync engine) that works with no network and reconciles changes when connectivity returns, backed by a lightweight Node API. It adapts the Web/PWA and Node courses, and introduces conflict resolution, background sync, and local-first architecture.
+
+**6 · CloudDeploy.** The capstone: taking an application all the way to production. **Infrastructure as Code**, CI/CD pipelines, container orchestration, and observability on a cloud provider. It adapts the Docker, Kubernetes, and CI/CD courses, and ties the series together by deploying and operating what the earlier projects built.
+
+## Verify
+
+You are oriented if you can place DevBlog correctly:
+
+- What number is DevBlog in the series? *#2.*
+- What came before it, and is it done? *TaskFlow, and yes — it is already live.*
+- What is the one-line difference between TaskFlow and DevBlog? *TaskFlow is REST + PostgreSQL + React; DevBlog is GraphQL + MongoDB + Next.js.*
+
+## Recap
+
+The Real-World Projects series runs TaskFlow → **DevBlog** → ShopMicro → FitTrack → OfflineNotes → CloudDeploy. TaskFlow (REST, PostgreSQL, React) is done and live; DevBlog (GraphQL, MongoDB, Next.js) is the current project and the focus of this course. The later projects add microservices, mobile, offline-first, and cloud deployment. With the mental model, architecture, tools, and roadmap in place, you are ready to start building.
+
+Next: [Setup & Tooling →](/devblog/en/setup/)

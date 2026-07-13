@@ -1,0 +1,113 @@
+---
+title: Prerequisites
+description: "เครื่องมือที่ต้องติดตั้งบน macOS ก่อนสร้าง DevBlog — Node, package manager, Docker Desktop, Nest CLI, mongosh และ GraphQL client — พร้อมคำสั่งตรวจสอบและผลลัพธ์ที่คาดหวังของแต่ละตัว"
+sidebar:
+  order: 3
+---
+
+## What we're building
+
+ก่อนเขียน DevBlog สักบรรทัด คุณต้องมี toolchain ในเครื่องที่ใช้งานได้: Node runtime, package manager, Docker สำหรับรันสแตก, Nest CLI สำหรับ scaffold API, MongoDB shell สำหรับตรวจดูข้อมูล และ GraphQL client สำหรับลองยิงเข้า API บทเรียนนี้ติดตั้งแต่ละตัวบน **macOS** และให้คำสั่งยืนยันว่ามันทำงาน พร้อมผลลัพธ์ที่คุณควรจะเห็น
+
+## Why
+
+เครื่องมือทุกตัวมีเหตุผลของมัน:
+
+- **Node 20+** รันทั้ง NestJS API และฟรอนต์เอนด์ Next.js
+- **npm หรือ pnpm** ติดตั้งและจัดการ dependency ของแต่ละแพ็กเกจ
+- **Docker Desktop** รัน MongoDB, API และเว็บแอปพร้อมกันด้วยคำสั่งเดียว — ไม่ต้องติดตั้ง Mongo ในเครื่อง
+- **Nest CLI** scaffold โมดูล resolver และ service เพื่อให้ backend คงเส้นคงวา
+- **mongosh** ให้คุณเปิดฐานข้อมูลและอ่านเอกสารที่ API เขียนลงไป ซึ่งมีค่ามากตอน debug
+- **GraphQL client** ให้คุณรัน query และ mutation ด้วยมือก่อนที่ UI จะมีอยู่จริง
+
+## Set it up
+
+ทำทีละตัวและรันคำสั่งยืนยันของมัน เวอร์ชันจะต่างกันเล็กน้อย รูปร่างของผลลัพธ์ต่างหากที่สำคัญ
+
+**Node 20+** — runtime ของทั้งสองแอป ติดตั้งผ่าน [nvm](https://github.com/nvm-sh/nvm) (แนะนำ) หรือตัวติดตั้งของ macOS แล้ว:
+
+```bash
+node -v
+# v20.11.1
+```
+
+`v20.x` หรือใหม่กว่าใช้ได้ทั้งหมด ถ้าเห็น `v18` หรือต่ำกว่า ให้อัปเกรดก่อนไปต่อ
+
+**npm / pnpm** — package manager npm มากับ Node อยู่แล้ว; pnpm เร็วกว่าและประหยัดพื้นที่ดิสก์สำหรับโมโนรีโป:
+
+```bash
+npm -v
+# 10.2.4
+
+# ไม่บังคับแต่แนะนำ
+npm i -g pnpm
+pnpm -v
+# 8.15.1
+```
+
+**Docker Desktop** — รันทั้งสแตก ติดตั้ง [Docker Desktop for Mac](https://www.docker.com/products/docker-desktop/) เปิดสักครั้งเพื่อให้ engine สตาร์ต แล้วยืนยันทั้ง CLI และปลั๊กอิน Compose:
+
+```bash
+docker --version
+# Docker version 24.0.6, build ed223bc
+
+docker compose version
+# Docker Compose version v2.23.0
+```
+
+โปรดสังเกตว่าเป็น `docker compose` (subcommand) ไม่ใช่ไบนารีเก่า `docker-compose` ถ้า `docker --version` error ให้ตรวจว่า Docker Desktop กำลังรันอยู่จริง
+
+**Nest CLI** — scaffold backend ติดตั้งแบบ global:
+
+```bash
+npm i -g @nestjs/cli
+nest --version
+# 10.3.0
+```
+
+**mongosh** — MongoDB shell สำหรับตรวจดูข้อมูล คุณมีสองทางเลือก ถ้าติดตั้ง `mongosh` ผ่าน [Homebrew](https://brew.sh):
+
+```bash
+brew install mongosh
+mongosh --version
+# 2.1.1
+```
+
+หรือเมื่อสแตกกำลังรัน ใช้ตัวที่อยู่ในคอนเทนเนอร์ Mongo อยู่แล้ว — ไม่ต้องติดตั้งในเครื่อง:
+
+```bash
+docker compose exec mongo mongosh
+# Current Mongosh Log ID: ...
+# Connecting to: mongodb://127.0.0.1:27017/...
+# test>
+```
+
+**GraphQL client** — สำหรับทดสอบ API ด้วยมือ NestJS + Apollo ให้บริการ playground ในตัวที่ `http://localhost:3000/graphql` เปิด URL นั้นในเบราว์เซอร์เมื่อ API รันแล้ว คุณจะได้ตัวแก้ query ที่รู้จัก schema พร้อม autocomplete:
+
+```txt
+เปิด http://localhost:3000/graphql
+# Apollo Sandbox / GraphQL playground โหลดขึ้นมาพร้อม schema ของคุณในแท็บ Docs
+```
+
+หรือจะใช้ [Apollo Sandbox](https://studio.apollographql.com/sandbox) แบบ standalone แล้วชี้ไปที่ URL เดียวกันก็ได้ ทั้งสองใช้ได้
+
+## Verify
+
+รันเช็กลิสต์นี้จากบนลงล่าง ทุกคำสั่งควรพิมพ์เวอร์ชันออกมา ไม่ใช่ error:
+
+```bash
+node -v            # v20+ 
+npm -v             # 10+
+docker --version   # Docker version 24+
+docker compose version   # v2+
+nest --version     # 10+
+mongosh --version  # 2+  (หรือใช้ docker compose exec mongo mongosh)
+```
+
+จากนั้นเปิด `http://localhost:3000/graphql` เมื่อ API มีอยู่แล้ว (ยังไม่มีในตอนนี้ — จะมาในโมดูลถัดไป) เพื่อยืนยันว่า GraphQL client โหลดได้ ถ้าทุกบรรทัดข้างบนพิมพ์เวอร์ชันออกมา เครื่องของคุณก็พร้อมแล้ว
+
+## Recap
+
+DevBlog ต้องการ Node 20+, package manager (npm หรือ pnpm), Docker Desktop พร้อมปลั๊กอิน Compose, Nest CLI, `mongosh` (ในเครื่องหรือผ่านคอนเทนเนอร์) และ GraphQL client (playground `/graphql` ในตัว หรือ Apollo Sandbox) แต่ละตัวมีคำสั่งยืนยันบรรทัดเดียว เมื่อทุกตัวพิมพ์เวอร์ชันออกมา คุณก็ไปต่อได้
+
+ถัดไป: [Roadmap →](/devblog/th/introduction/roadmap/)

@@ -1,0 +1,44 @@
+---
+title: Roadmap
+description: "ตำแหน่งของ DevBlog ในซีรีส์ Real-World Projects หกโปรเจกต์ — TaskFlow, DevBlog, ShopMicro, FitTrack, OfflineNotes และ CloudDeploy — พร้อมสแตกและคอร์สที่แต่ละตัวต่อยอด"
+sidebar:
+  order: 4
+---
+
+## What we're building
+
+DevBlog ไม่ใช่ทิวทอเรียลเดี่ยว ๆ มันคือ **โปรเจกต์ที่ #2** ของซีรีส์ **Real-World Projects** หกโปรเจกต์ — ลำดับที่แต่ละโปรเจกต์เป็นแอปพลิเคชันสมบูรณ์ที่ deploy ได้ และต่อยอดคอร์สหลายคอร์สจาก Learn Hub มารวมเป็นการสร้างเดียวที่สมจริง บทเรียนนี้วาง DevBlog ไว้ในซีรีส์นั้นเพื่อให้คุณรู้ว่าอะไรมาก่อนและอะไรมาถัดไป
+
+## Why
+
+คอร์สแต่ละคอร์สสอนเรื่องเดียวได้ดี — คอร์สเรื่อง GraphQL, คอร์สเรื่อง Next.js, คอร์สเรื่อง MongoDB แต่แอปพลิเคชันจริงต้องใช้หลายอย่างพร้อมกัน เชื่อมเข้าด้วยกันพร้อม trade-off และตัวประสานที่ไม่มีคอร์สเดียวครอบคลุม ซีรีส์ Real-World Projects มีขึ้นเพื่ออุดช่องว่างนั้น: แต่ละโปรเจกต์หยิบชุดหัวข้อจากหลายคอร์สและบังคับให้คุณรวมมันเป็นสิ่งที่รันและ deploy ได้จริง การเห็นทั้งซีรีส์ยังแสดงว่าทักษะทบต้นกัน — auth จากโปรเจกต์หนึ่ง คอนเทนเนอร์จากอีกโปรเจกต์ และการเทสต์ตลอดทั้งซีรีส์
+
+## Set it up
+
+ซีรีส์นี้มีหกโปรเจกต์ สร้างตามลำดับ **TaskFlow ไลฟ์อยู่แล้ว** และ **DevBlog — ตัวนี้ — คือโปรเจกต์ปัจจุบัน** ที่เหลืออยู่ในโรดแมป
+
+**1 · TaskFlow ✅ (เสร็จแล้ว ไลฟ์อยู่แล้ว)** แอปจัดการงานและโปรเจกต์ Backend เป็น Node/NestJS พร้อม REST API และ PostgreSQL, ฟรอนต์เอนด์ React และ JWT auth ต่อยอดคอร์ส Node, React และ SQL/PostgreSQL และวางแพตเทิร์นพื้นฐาน — โมดูล, auth, การเทสต์ — ที่โปรเจกต์ถัด ๆ ไปสร้างต่อ
+
+**2 · DevBlog ← คุณอยู่ที่นี่** ระบบ headless CMS และบล็อกสาธารณะ Node/NestJS พร้อม **code-first GraphQL** บน MongoDB และฟรอนต์เอนด์ Next.js App Router ที่ทำ SSR/ISR สำหรับไซต์สาธารณะ บวก admin dashboard ที่ต้องยืนยันตัวตน ต่อยอดคอร์ส Node, MongoDB, GraphQL, Next.js/React และ Docker และแนะนำการทำ document data modelling, สัญญา GraphQL ที่มี type และเวิร์กโฟลว์เนื้อหา/การตรวจสอบ
+
+**3 · ShopMicro** Backend อีคอมเมิร์ซที่สร้างเป็น **microservices** หลายเซอร์วิส Node สื่อสารกันผ่าน gRPC และ message broker แต่ละตัวมีที่เก็บข้อมูลของตัวเอง อยู่หลัง API gateway ต่อยอดคอร์ส Node, Microservices และ Message Queue และแนะนำการแยกเซอร์วิส การสื่อสารระหว่างเซอร์วิส และ eventual consistency
+
+**4 · FitTrack** แอปมือถือติดตามการออกกำลังกาย ไคลเอนต์ **React Native / Expo** ที่ซิงก์แบบเป็นมิตรกับ offline กับ backend Node พร้อมกราฟและ API ของอุปกรณ์ ต่อยอดคอร์ส React Native และ Node และแนะนำ UI มือถือ การเก็บข้อมูลในเครื่อง และการซิงก์ข้อมูลจากอุปกรณ์ไปยังเซิร์ฟเวอร์
+
+**5 · OfflineNotes** แอปโน้ตแบบ **offline-first** ไคลเอนต์แบบ local-first (IndexedDB / sync engine) ที่ทำงานได้แม้ไม่มีเน็ต และประสานการเปลี่ยนแปลงเมื่อกลับมามีการเชื่อมต่อ หนุนหลังด้วย Node API แบบเบา ต่อยอดคอร์ส Web/PWA และ Node และแนะนำการแก้ conflict, background sync และสถาปัตยกรรม local-first
+
+**6 · CloudDeploy** บทสรุป: พาแอปพลิเคชันไปจนถึง production **Infrastructure as Code**, ไปป์ไลน์ CI/CD, การ orchestrate คอนเทนเนอร์ และ observability บนคลาวด์ ต่อยอดคอร์ส Docker, Kubernetes และ CI/CD และผูกซีรีส์เข้าด้วยกันด้วยการ deploy และดูแลสิ่งที่โปรเจกต์ก่อนหน้าสร้างไว้
+
+## Verify
+
+คุณเข้าใจตำแหน่งแล้วถ้าวาง DevBlog ได้ถูก:
+
+- DevBlog เป็นลำดับที่เท่าไรในซีรีส์? *#2*
+- อะไรมาก่อนมัน และเสร็จหรือยัง? *TaskFlow และเสร็จแล้ว — ไลฟ์อยู่แล้ว*
+- ความต่างบรรทัดเดียวระหว่าง TaskFlow กับ DevBlog คืออะไร? *TaskFlow เป็น REST + PostgreSQL + React; DevBlog เป็น GraphQL + MongoDB + Next.js*
+
+## Recap
+
+ซีรีส์ Real-World Projects ไล่จาก TaskFlow → **DevBlog** → ShopMicro → FitTrack → OfflineNotes → CloudDeploy TaskFlow (REST, PostgreSQL, React) เสร็จและไลฟ์แล้ว; DevBlog (GraphQL, MongoDB, Next.js) คือโปรเจกต์ปัจจุบันและเป็นจุดสนใจของคอร์สนี้ โปรเจกต์ถัด ๆ ไปเพิ่ม microservices, มือถือ, offline-first และการ deploy บนคลาวด์ เมื่อมีแบบจำลองความคิด สถาปัตยกรรม เครื่องมือ และโรดแมปครบแล้ว คุณก็พร้อมเริ่มสร้าง
+
+ถัดไป: [Setup & Tooling →](/devblog/th/setup/)

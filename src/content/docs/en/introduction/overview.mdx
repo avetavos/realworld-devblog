@@ -1,0 +1,85 @@
+---
+title: Overview
+description: "What DevBlog is, the author-to-reader flow, the feature list, and a map from each build module to the Learn Hub course it adapts."
+sidebar:
+  order: 1
+---
+
+## What we're building
+
+**DevBlog** is a headless CMS with a public blog on top of it. "Headless" means the content store and the API are decoupled from how the content is displayed: authors write and manage posts through an admin dashboard, the posts live in a database behind a GraphQL API, and one or more front ends read from that API to render pages for the public.
+
+By the end of the course you will have a single repository that runs with one command — `docker compose up` — and starts three services: a MongoDB database, a NestJS GraphQL API, and a Next.js web app that serves both the public blog and the admin dashboard.
+
+## Why
+
+Most tutorials build a toy blog: one process, a handful of hardcoded posts, no auth, no moderation, no deployment story. DevBlog is deliberately closer to what a real content team ships. It separates the people who *write* content from the people who *read* it, it puts a typed API between the database and the UI, and it treats publishing and comment moderation as first-class workflows rather than afterthoughts.
+
+The author-to-reader flow, in words:
+
+1. An **author** signs in to the admin dashboard (JWT auth) and writes a post in **Markdown**, adds **tags**, and saves it as a draft.
+2. When the post is ready, the author **publishes** it. The API records it as published with a timestamp.
+3. A **reader** visits the public blog. Next.js renders the post on the server (SSR) or serves a pre-rendered, incrementally-updated page (ISR), fetching the content from the GraphQL API.
+4. The reader leaves a **comment**. It arrives in a *pending* state and is hidden from the public until an author **moderates** it — approving or rejecting it from the dashboard.
+
+## Pros & cons
+
+**What this design buys you**
+
+- A clean separation between content authoring and content delivery, so the public site can be cached hard and stay fast while the admin UI stays dynamic.
+- A single typed contract (the GraphQL schema) that both front ends and any future client share.
+- Realistic workflows — drafts, publishing, tags, and comment moderation — that mirror production CMS behaviour.
+
+**What it costs you**
+
+- More moving parts than a monolith: a database, an API, and a web app instead of one server.
+- You maintain a schema and auth layer you would not need for a purely static site.
+- Two audiences (authors and readers) means two UIs and two sets of access rules to reason about.
+
+For a personal site a static generator would be simpler. DevBlog is worth the extra structure precisely when content is authored by people who are not developers and updated continuously.
+
+## Set it up
+
+There is nothing to install in this lesson — that is the next one. Here you only need the mental model above: **author → publish → read → comment → moderate**, with GraphQL as the contract in the middle and MongoDB as the store underneath.
+
+The feature list you will build, module by module:
+
+- **Markdown posts** — authors write in Markdown; the API stores the raw Markdown and the front end renders it.
+- **Tags** — posts are categorised and the public blog can be browsed by tag.
+- **Comments with moderation** — readers comment; authors approve or reject before anything is shown publicly.
+- **GraphQL API** — a code-first, typed API built with NestJS and Apollo.
+- **SSR/ISR public blog** — a fast, SEO-friendly public site rendered with the Next.js App Router.
+- **Admin dashboard** — an authenticated UI for writing, publishing, tagging, and moderating.
+
+## Verify
+
+You have the right mental model if you can answer these without scrolling up:
+
+- Where does a post live between being written and being read? *In MongoDB, behind the GraphQL API.*
+- What has to happen before a reader sees a comment? *An author has to moderate (approve) it.*
+- Why are there two UIs? *One is the public, cacheable blog for readers; the other is the authenticated admin dashboard for authors.*
+
+## Recap
+
+DevBlog is a headless CMS plus a public blog: authors publish Markdown posts with tags through an admin dashboard, a NestJS GraphQL API over MongoDB is the contract in the middle, and a Next.js App Router front end renders the public blog with SSR/ISR. Comments are moderated before they appear.
+
+The table below maps each of the twelve build modules to the Learn Hub course it adapts.
+
+### Course map
+
+| Module | What you build | Learn Hub course it adapts |
+| --- | --- | --- |
+| 1 · Setup & Tooling | The monorepo, tooling, and a Docker Compose skeleton | Node · Docker |
+| 2 · Data Modeling | MongoDB schemas for posts, tags, users, and comments | MongoDB |
+| 3 · Backend Foundations | NestJS modules, providers, and a layered structure | Node · Design Patterns |
+| 4 · Authentication | Passport-JWT auth for authors | Node |
+| 5 · GraphQL API | Code-first GraphQL resolvers with Apollo | GraphQL |
+| 6 · Content Workflow | Draft, publish, and tag workflows | Refactoring · Design Patterns |
+| 7 · Comments | Comment model and moderation flow | MongoDB · GraphQL |
+| 8 · Frontend Foundations | Next.js App Router project and the GraphQL client | Next.js · React |
+| 9 · Public Blog | The SSR/ISR public reading experience | Next.js |
+| 10 · Admin Dashboard | The authenticated authoring and moderation UI | Next.js · React |
+| 11 · Testing | Unit and end-to-end tests across the stack | — |
+| 12 · Docker & Compose | The full `docker compose up` production stack | Docker |
+
+Next: [Architecture →](/devblog/en/introduction/architecture/)
