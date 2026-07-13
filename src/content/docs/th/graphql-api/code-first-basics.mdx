@@ -1,0 +1,184 @@
+---
+title: พื้นฐาน Code-first
+description: "จัดระบบ @ObjectType/@Field, @Resolver/@Query/@Mutation/@Args/@InputType และ registerEnumType ให้เป็นทางการ แล้วดู SDL ที่ autoSchemaFile สร้างจาก Post, Tag, PostPage และ PostStatus"
+sidebar:
+  order: 1
+---
+
+## What we're building
+
+ไฟล์สี่ไฟล์ที่ทำให้ข้อมูลของโมดูลนี้มีรูปทรงแบบ GraphQL โดยยังไม่มี resolver เลยสักตัว: `apps/api/src/posts/enums/post-status.enum.ts` (`PostStatus` ลงทะเบียนด้วย `registerEnumType`), `apps/api/src/posts/models/post.model.ts` (`Post`), `apps/api/src/posts/models/post-page.model.ts` (`PostPage`) และ `apps/api/src/tags/models/tag.model.ts` (`Tag`) [Auth resolver & GraphQL setup](/devblog/th/auth/auth-resolver/) ใช้ `@ObjectType()`/`@Field()` กับ `User` และ `@InputType()` กับ `RegisterInput`/`LoginInput` ไปแล้ว — บทเรียนนี้ตั้งชื่อ pattern นั้นให้ชัดเจน แล้วเพิ่ม decorator สองตัวที่บทเรียนนั้นไม่ต้องใช้: `registerEnumType` และตัวเลือกระดับ field (`nullable`, list type) ที่โมเดลเนื้อหาจริงต้องการ
+
+## Why
+
+**Code-first** หมายความว่า GraphQL schema ถูก *สร้างขึ้น* จาก TypeScript class ที่ใส่ decorator ไว้ — `@ObjectType()` ทำเครื่องหมายว่า class นั้นเป็น GraphQL object type, `@Field()` ทำเครื่องหมายว่า property นั้นเป็นหนึ่งใน field ของมัน, `@InputType()` ทำแบบเดียวกันสำหรับรูปทรงของ mutation argument และ `@Resolver()`/`@Query()`/`@Mutation()`/`@Args()` (บทถัดไป) เชื่อม operation ที่รับและคืนค่า type เหล่านั้น ตัวเลือก `autoSchemaFile` ของ `GraphQLModule.forRoot` ที่ตั้งค่าไว้ใน [Auth resolver & GraphQL setup](/devblog/th/auth/auth-resolver/) อ่าน metadata ของ decorator ทั้งหมดนี้ตอน boot แล้วเขียน SDL ที่ได้ลงไปที่ `apps/api/src/schema.gql` — ไฟล์นั้นเป็น build artifact ของ class ด้านล่าง ไม่ใช่สิ่งที่ควรแก้ด้วยมือ
+
+`@Field()` ต้องการฟังก์ชันระบุ type ชัดเจนแบบ `@Field(() => X)` เมื่อใดก็ตามที่ type ของ TypeScript เองไม่สามารถถูก reflect ได้ตรง ๆ — property ที่เป็น `string`, `number` (ในฐานะ `Int` — ดูด้านล่าง) หรือ `boolean` จะถูก infer ให้อัตโนมัติ แต่ list (`@Field(() => [String])` สำหรับ `tags: string[]`), การอ้างอิงถึง `@ObjectType()` อื่น (`@Field(() => User)` สำหรับ `author: User`) หรือ type แบบ `ID`/enum ล้วนต้องระบุเอง `{ nullable: true }` ทำเครื่องหมายว่า field นั้น optional ใน schema — `?` ของ TypeScript เองบน property เป็นเพียง hint ระดับ compile-time เท่านั้น และไม่มีผลต่อ SDL ที่สร้างขึ้นเลยด้วยตัวมันเอง
+
+TypeScript `enum` เฉย ๆ จะไม่ถูกดึงเข้า schema แค่ด้วย `@Field()` — `registerEnumType(PostStatus, { name: 'PostStatus' })` เป็นการเรียกครั้งเดียว (รันครั้งเดียวตอนโหลดโมดูล ตรงจุดที่ประกาศ enum) ที่บอก schema builder ว่า enum นี้มีอยู่และจะตั้งชื่อมันใน SDL ว่าอะไร มีจุดที่ควรสังเกตไว้ล่วงหน้า: ค่าของ enum ใน SDL คือ *ชื่อ* สมาชิกของ TypeScript (`DRAFT`, `PUBLISHED`) ไม่ใช่ค่า string ที่อยู่เบื้องหลัง (`'draft'`, `'published'`) — client เขียน `status: DRAFT` ใน query ส่วน resolver และ `PostsService` ที่อยู่ข้างใต้ยังคงทำงานกับ string `'draft'` ตัวเดิมเป๊ะที่ [Schemas](/devblog/th/data-modeling/schemas/) ใส่ไว้ใน `Post.status` แล้ว ไม่มีอะไรต้อง map ระหว่างสองฝั่งนี้ด้วยมือเลย นั่นคือสิ่งที่ `registerEnumType` ตั้งค่าไว้ให้
+
+property ที่เป็น type `Date` ไม่ต้อง import scalar พิเศษใด ๆ เลยก็ทำงานได้ — โหมด code-first ของ `@nestjs/graphql` มี built-in scalar มาให้ห้าตัว (`ID`, `Int`, `Float` และ representation ของ `Date` อีกสองแบบ) และ map field ที่เป็น `Date` ธรรมดาไปที่ `GraphQLISODateTime` (ชื่อ `DateTime` ใน SDL ที่สร้างขึ้น) โดยอัตโนมัติ `createdAt`, `updatedAt` และ `publishedAt` ด้านล่างไม่ต้องการอะไรเลยนอกจาก `@Field()` เปล่า ๆ
+
+## Pros & cons
+
+**Code-first เทียบกับ schema-first** Schema-first คือการเขียนไฟล์ SDL `.graphql` ด้วยมือก่อน แล้วค่อย implement resolver method ที่ต้องตรงกับรูปทรงนั้นเองอย่างเป็นอิสระ — SDL คือแหล่งความจริงเดียว แต่ไม่มีอะไรกันไม่ให้ return type ของ resolver ค่อย ๆ เพี้ยนออกจากมันแบบเงียบ ๆ ความไม่ตรงกันนั้นถูกจับได้ตอน runtime เท่านั้น เมื่อ client เห็น field คืนค่ามาเป็น `null` หรือหายไป Code-first กลับด้านตรงนี้: class ที่ใส่ decorator เป็นแหล่งความจริงเดียว SDL เป็น artifact ที่ถูกสร้างขึ้น และ resolver method ที่ return type ไม่ตรงกับ `@ObjectType()` ในเชิงโครงสร้างคือ compile error ของ TypeScript ไม่ใช่ความประหลาดใจตอน runtime ต้นทุนก็มีจริงเช่นกัน — code-first ผูก schema definition ไว้กับภาษาและ framework ที่สร้างมันขึ้นมา ดังนั้นไฟล์ `.graphql` แบบ schema-first (พกพาได้ มี tooling รองรับ อ่านได้โดยไม่ต้องเปิดโค้ดเลย) จึงเป็นตัวเลือกที่ดีกว่าสำหรับทีมที่มอง schema เองเป็นสัญญาข้าม team ที่ถูกต่อรองแยกออกจาก implementation ของ service ใดตัวหนึ่ง DevBlog เป็น NestJS API ตัวเดียวที่เป็นเจ้าของ schema ทั้งหมดของตัวเอง ซึ่งตรงกับกรณีที่ code-first ถูกสร้างมาเพื่อรองรับพอดี
+
+## Set it up
+
+สร้าง `apps/api/src/posts/enums/post-status.enum.ts`:
+
+```ts
+import { registerEnumType } from '@nestjs/graphql';
+
+export enum PostStatus {
+  DRAFT = 'draft',
+  PUBLISHED = 'published',
+}
+
+registerEnumType(PostStatus, {
+  name: 'PostStatus',
+  description: "Publication status of a post — mirrors Post.status from Data Modeling.",
+});
+```
+
+สร้าง `apps/api/src/posts/models/post.model.ts`:
+
+```ts
+import { Field, ID, ObjectType } from '@nestjs/graphql';
+import { User } from '../../users/models/user.model';
+import { PostStatus } from '../enums/post-status.enum';
+
+@ObjectType()
+export class Post {
+  @Field(() => ID)
+  id: string;
+
+  @Field()
+  title: string;
+
+  @Field()
+  slug: string;
+
+  @Field()
+  body: string;
+
+  @Field({ nullable: true })
+  excerpt?: string;
+
+  @Field({ nullable: true })
+  coverImage?: string;
+
+  @Field(() => PostStatus)
+  status: PostStatus;
+
+  @Field(() => [String])
+  tags: string[];
+
+  @Field({ nullable: true })
+  publishedAt?: Date;
+
+  @Field()
+  createdAt: Date;
+
+  @Field()
+  updatedAt: Date;
+
+  @Field(() => User)
+  author: User;
+}
+```
+
+สร้าง `apps/api/src/posts/models/post-page.model.ts`:
+
+```ts
+import { Field, Int, ObjectType } from '@nestjs/graphql';
+import { Post } from './post.model';
+
+@ObjectType()
+export class PostPage {
+  @Field(() => [Post])
+  items: Post[];
+
+  @Field(() => Int)
+  total: number;
+
+  @Field(() => Int)
+  page: number;
+
+  @Field(() => Int)
+  pageSize: number;
+}
+```
+
+สร้าง `apps/api/src/tags/models/tag.model.ts`:
+
+```ts
+import { Field, ID, ObjectType } from '@nestjs/graphql';
+
+@ObjectType()
+export class Tag {
+  @Field(() => ID)
+  id: string;
+
+  @Field()
+  name: string;
+
+  @Field()
+  slug: string;
+}
+```
+
+- **`Post.author: User`** — ประกาศไว้เป็น field ตรงนี้ แต่ยังไม่มีอะไรมาเติมค่าให้โดยตรง [Posts resolver](/devblog/th/graphql-api/posts-resolver/) จะเพิ่ม method `@ResolveField()` ที่ resolve มันจาก `ObjectId` ของ `author` ที่ [Schemas](/devblog/th/data-modeling/schemas/) ใส่ไว้บน `Post` แบบ Mongoose — เป็นการแยก "field ประกาศไว้บน type, resolve ด้วย method แยกต่างหาก" แบบเดียวกับที่ [Auth resolver & GraphQL setup](/devblog/th/auth/auth-resolver/) ไม่จำเป็นต้องใช้ แต่การอ้างอิงข้าม entity จริง ๆ ต้องใช้
+- **`PostPage`** ไม่มี logic ของตัวเองเลย — เป็นแค่รูปทรงธรรมดาสำหรับผลลัพธ์ของ query เดียว (`items`, `total`, `page`, `pageSize`) ซึ่งจะอธิบายครบถ้วนใน [Pagination](/devblog/th/graphql-api/pagination/)
+- **`Tag.id`** ใช้ `ID` แบบเดียวกับที่ `Post.id` และ `User.id` ใช้อยู่แล้ว — `_id` ของ Mongo โผล่ออกมาผ่าน virtual `.id` ของ Mongoose เป็น string ธรรมดา และ `ID` คือ GraphQL scalar สำหรับ "สิ่งนี้ใช้ระบุตัวตนของสิ่งหนึ่ง" ต่างจาก `String` ที่บังเอิญเก็บข้อความไว้
+
+## Verify
+
+```bash
+npm run start:dev
+```
+
+การ boot จะเขียน schema ที่อัปเดตแล้วไปที่ `apps/api/src/schema.gql` เปิดไฟล์นั้นแล้วตรวจว่ารูปทรงทั้งสี่นี้ปรากฏอยู่ ถูกสร้างจาก class ด้านบนโดยไม่มีไฟล์ `.graphql` ใดที่เขียนด้วยมือเลย:
+
+```graphql
+enum PostStatus {
+  DRAFT
+  PUBLISHED
+}
+
+type Post {
+  id: ID!
+  title: String!
+  slug: String!
+  body: String!
+  excerpt: String
+  coverImage: String
+  status: PostStatus!
+  tags: [String!]!
+  publishedAt: DateTime
+  createdAt: DateTime!
+  updatedAt: DateTime!
+  author: User!
+}
+
+type PostPage {
+  items: [Post!]!
+  total: Int!
+  page: Int!
+  pageSize: Int!
+}
+
+type Tag {
+  id: ID!
+  name: String!
+  slug: String!
+}
+```
+
+`!` ทุกตัวย้อนกลับไปที่การไม่มี `{ nullable: true }` บน `@Field()` ตัวที่ตรงกัน — `excerpt`, `coverImage` และ `publishedAt` เป็น field เดียวที่ optional บน `Post` ตรงกับ property ที่มี `?` ที่ [Schemas](/devblog/th/data-modeling/schemas/) ทำเครื่องหมายว่าไม่ `required` ฝั่ง Mongoose พอดี
+
+## Recap
+
+`@ObjectType()`/`@Field()` แปลง class ให้เป็น GraphQL type; `registerEnumType` ทำแบบเดียวกันกับ TypeScript `enum` โดย map ชื่อสมาชิก (`DRAFT`) ไปเป็น enum ใน schema ในขณะที่ค่า string เบื้องหลัง (`'draft'`) ยังคงไม่ถูกแตะต้องสำหรับชั้น Mongoose ข้างใต้ `autoSchemaFile` แปลงทั้งหมดนี้ให้เป็น `schema.gql` ตอน boot — เป็น artifact ที่ถูกสร้างขึ้น ไม่ใช่ SDL ที่เขียนด้วยมือ ตอนนี้ `Post`, `PostPage` และ `Tag` เป็น GraphQL type จริงแล้ว แต่ยังไม่มี operation ผูกอยู่เลย [Posts resolver](/devblog/th/graphql-api/posts-resolver/) คือจุดที่ `@Resolver()`, `@Query()`, `@Mutation()` และ `@Args()` เปลี่ยนมันให้เป็น API ที่ใช้งานได้จริง
+
+Next: [Posts resolver →](/devblog/th/graphql-api/posts-resolver/)

@@ -1,0 +1,365 @@
+---
+title: Posts resolver
+description: "PostsService และ PostsResolver — query ต่าง ๆ, mutation create/update/publish/delete ที่มี guard คุ้มกัน และ @ResolveField author ที่แปลง ObjectId ref ให้เป็น User จริง"
+sidebar:
+  order: 2
+---
+
+## What we're building
+
+`apps/api/src/posts/posts.service.ts` (`PostsService` ที่ต่อยอดด้วย CRUD จริงบน `onModuleInit` boot check จาก [Mongoose connection](/devblog/th/backend-foundations/mongoose-connection/)) และ `apps/api/src/posts/posts.resolver.ts` (`PostsResolver`) — resolver ตัวแรกที่อ่านและเขียนเนื้อหาจริง โดยใช้ type `Post`/`PostPage`/`PostStatus` จาก [Code-first basics](/devblog/th/graphql-api/code-first-basics/) และ guard จาก [Guards & roles](/devblog/th/auth/guards-roles/) มี `@InputType()` ใหม่สองตัวคือ `CreatePostInput` และ `UpdatePostInput` มาปิดท้าย
+
+## Why
+
+`posts` และ `post` เป็น query สาธารณะที่ไม่มี guard — เหตุผลเดียวกับที่ `register`/`login` ใน [Auth resolver & GraphQL setup](/devblog/th/auth/auth-resolver/) เข้าถึงได้จาก client ที่ไม่ล็อกอินก็ใช้ได้ที่นี่เช่นกัน: การอ่านเนื้อหาที่เผยแพร่แล้วไม่ใช่ข้อมูลหวงห้าม `createPost`, `updatePost` และ `publishPost` ต้องการ `@UseGuards(GqlAuthGuard)` เท่านั้น — ผู้ใช้ที่ล็อกอินแล้วคนไหนก็เขียนได้ ตรงกับที่ `Post.author` ใน [Schemas](/devblog/th/data-modeling/schemas/) เป็นการอ้างอิงที่ required ไปยัง `User` *คนใดคนหนึ่ง* ไม่ใช่ admin โดยเฉพาะ `deletePost` เป็น operation เดียวที่มีการตรวจ role คือ `@UseGuards(GqlAuthGuard, RolesGuard)` บวก `@Roles('admin')` — การลบเนื้อหาทำลายล้างมากพอที่ DevBlog จะสงวนไว้ให้ admin เท่านั้น ด้วยเหตุผลเดียวกับที่ [Guards & roles](/devblog/th/auth/guards-roles/) อธิบายไว้แล้วว่าทำไม guard ทั้งสองจึงแยกกันและมีลำดับ
+
+`Post.author` บน Mongoose schema เป็นการอ้างอิงแบบ `Types.ObjectId` ไม่ใช่ snapshot ของ `User` ที่ฝังไว้ — [Schemas](/devblog/th/data-modeling/schemas/) อธิบายเหตุผลไว้แล้ว แต่ GraphQL type `Post` ประกาศ `author: User` เป็น object จริงที่ client query field ต่อได้ (`author { displayName }`) `@ResolveField()` คือสะพานเชื่อม: เป็น resolver method ที่รันเฉพาะตอนที่ query ขอ `author` จริง ๆ โดยรับ `Post` ที่กำลังประมวลผลอยู่ผ่าน `@Parent()` แล้ว return `User` จริงด้วยการ lookup `post.author` ผ่าน `UsersService` — pattern "method เดียวเป็นขอบเขตที่แปลงรูปทรงการเก็บข้อมูลให้เป็นรูปทรงที่ส่งออกไป" แบบเดียวกับที่ `AuthResolver.toGraphQLUser` ใช้ใน [Auth resolver & GraphQL setup](/devblog/th/auth/auth-resolver/) เพียงแต่ต่อสายไว้เป็น field resolver แทนที่จะเป็น private method ธรรมดา เพราะ `author` ต้อง resolve ทีละ `Post` ไม่ใช่ครั้งเดียวต่อ request
+
+การ resolve ทีละ `Post` นี้เองคือกับดักตัวจริงของบทเรียนนี้ query `posts` ที่คืนโพสต์ 20 อัน แต่ละอันขอ `author { displayName }` จะยิง `usersService.findById` แยกกัน 20 ครั้ง — หนึ่งครั้งต่อโพสต์ ทั้งหมดก่อนที่ response จะถูกประกอบขึ้นได้ — นี่คือปัญหา **N+1** คลาสสิกของ GraphQL: 1 query สำหรับ list, N query สำหรับความสัมพันธ์ของแต่ละรายการ มันมองไม่เห็นเลยใน `Verify` ของบทเรียนนี้เอง (โพสต์เดียว, lookup เดียว, ไม่มีทางเห็น pattern) และจะโผล่ออกมาก็ต่อเมื่อมี traffic แบบ list จริง ทางแก้คือ **DataLoader**: cache ต่อ request ที่รวม `author` lookup ทุกตัวที่ยิงระหว่างการ execute GraphQL หนึ่งครั้งให้กลายเป็นการเรียก `findByIds([...])` ครั้งเดียว พร้อม deduplicate ID ที่ซ้ำกันโดยอัตโนมัติ DevBlog ไม่ได้เพิ่มมันในคอร์สนี้ — แต่ควรรู้ไว้สำหรับการอ่านข้อมูลหนัก ๆ แบบนี้ใน deployment จริง และควรสังเกตรูปทรงของปัญหานี้ให้ออกทันทีที่ `@ResolveField()` ยิง database call ของตัวเองต่อ parent หนึ่งตัว
+
+## Pros & cons
+
+**`@ResolveField()` (lazy, lookup ต่อ request) เทียบกับการฝัง snapshot ของ author ไว้ในทุก `Post`** การ lookup `author` ผ่าน reference ที่ยังมีชีวิตอยู่ ต้องแลกกับความเสี่ยง N+1 ด้านบนพอดี เพื่อให้ `author.displayName` สะท้อนค่าปัจจุบันเสมอ — trade-off เดียวกับที่ [Schemas](/devblog/th/data-modeling/schemas/) เคยเลือกไว้แล้วในชั้น persistence (`ObjectId` ref ไม่ใช่สำเนาที่ฝังไว้) เพียงแค่โผล่ขึ้นมาอีกครั้งในชั้น GraphQL เพราะ field resolver จะสดใหม่ได้แค่เท่าที่ reference ที่มัน resolve เอื้อให้เท่านั้น
+
+**การ guard `create`/`update`/`publish` แบบ "ผู้ใช้ที่ล็อกอินแล้วคนไหนก็ได้" เทียบกับการจำกัดให้เฉพาะ role หนึ่ง** DevBlog มอง `author`/`admin` เป็น role สำหรับแยกความแตกต่างระหว่างการอ่าน-กับ-การกลั่นกรอง ไม่ใช่การเขียน-กับ-ห้ามเขียน — ผู้ใช้ที่ล็อกอินแล้วคนไหนก็เป็นเจ้าของและแก้ไขเนื้อหาของตัวเองได้ สะท้อนวิธีทำงานของบล็อกหลายผู้เขียนจริง ๆ การสงวน `deletePost` ไว้ให้ `admin` เท่านั้นคือจุดเดียวที่ความแตกต่างนี้สำคัญจริง ๆ: ผู้เขียนที่ไม่ควรลบผลงานของผู้เขียนคนอื่นถาวรได้ เป็นข้อกำหนดด้าน access-control จริงที่สมควรมี guard ของตัวเอง ไม่ใช่รวมไปกับการแก้ไขทั่วไป
+
+## Set it up
+
+สร้าง `apps/api/src/posts/dto/create-post.input.ts`:
+
+```ts
+import { Field, InputType } from '@nestjs/graphql';
+import { IsArray, IsOptional, IsString, IsUrl, MinLength } from 'class-validator';
+
+@InputType()
+export class CreatePostInput {
+  @Field()
+  @IsString()
+  @MinLength(3)
+  title: string;
+
+  @Field()
+  @IsString()
+  @MinLength(1)
+  body: string;
+
+  @Field({ nullable: true })
+  @IsOptional()
+  @IsString()
+  excerpt?: string;
+
+  @Field({ nullable: true })
+  @IsOptional()
+  @IsUrl()
+  coverImage?: string;
+
+  @Field(() => [String], { nullable: true })
+  @IsOptional()
+  @IsArray()
+  @IsString({ each: true })
+  tags?: string[];
+}
+```
+
+สร้าง `apps/api/src/posts/dto/update-post.input.ts`:
+
+```ts
+import { InputType, PartialType } from '@nestjs/graphql';
+import { CreatePostInput } from './create-post.input';
+
+@InputType()
+export class UpdatePostInput extends PartialType(CreatePostInput) {}
+```
+
+อัปเดต `apps/api/src/posts/posts.service.ts`:
+
+```ts
+import { Injectable, NotFoundException } from '@nestjs/common';
+import { InjectModel } from '@nestjs/mongoose';
+import { Model } from 'mongoose';
+import { Post, PostDocument } from './schemas/post.schema';
+import { PostStatus } from './enums/post-status.enum';
+import { CreatePostInput } from './dto/create-post.input';
+import { UpdatePostInput } from './dto/update-post.input';
+
+export interface FindPostsPageOptions {
+  status?: PostStatus;
+  tag?: string;
+  page?: number;
+  pageSize?: number;
+}
+
+export interface PostsPageResult {
+  items: PostDocument[];
+  total: number;
+  page: number;
+  pageSize: number;
+}
+
+@Injectable()
+export class PostsService {
+  constructor(
+    @InjectModel(Post.name) private readonly postModel: Model<PostDocument>,
+  ) {}
+
+  async create(authorId: string, input: CreatePostInput): Promise<PostDocument> {
+    // TODO(Content Workflow): a real slugify() with collision handling lands in
+    // /devblog/en/content-workflow/ — this inline placeholder just keeps `create`
+    // runnable until then.
+    const slug = input.title
+      .toLowerCase()
+      .trim()
+      .replace(/[^a-z0-9]+/g, '-')
+      .replace(/(^-|-$)/g, '');
+    const created = new this.postModel({ ...input, slug, author: authorId });
+    return created.save();
+  }
+
+  async findPage(options: FindPostsPageOptions = {}): Promise<PostsPageResult> {
+    const { status, tag, page = 1, pageSize = 10 } = options;
+    const filter: Record<string, unknown> = {};
+    if (status) {
+      filter.status = status;
+    }
+    if (tag) {
+      filter.tags = tag;
+    }
+
+    const skip = (page - 1) * pageSize;
+    const [items, total] = await Promise.all([
+      this.postModel.find(filter).sort({ createdAt: -1 }).skip(skip).limit(pageSize).exec(),
+      this.postModel.countDocuments(filter).exec(),
+    ]);
+
+    return { items, total, page, pageSize };
+  }
+
+  findBySlug(slug: string): Promise<PostDocument | null> {
+    return this.postModel.findOne({ slug }).exec();
+  }
+
+  findById(id: string): Promise<PostDocument | null> {
+    return this.postModel.findById(id).exec();
+  }
+
+  async update(id: string, input: UpdatePostInput): Promise<PostDocument> {
+    const updated = await this.postModel.findByIdAndUpdate(id, input, { new: true }).exec();
+    if (!updated) {
+      throw new NotFoundException('Post not found');
+    }
+    return updated;
+  }
+
+  async remove(id: string): Promise<PostDocument> {
+    const removed = await this.postModel.findByIdAndDelete(id).exec();
+    if (!removed) {
+      throw new NotFoundException('Post not found');
+    }
+    return removed;
+  }
+
+  async publish(id: string): Promise<PostDocument> {
+    const published = await this.postModel
+      .findByIdAndUpdate(id, { status: PostStatus.PUBLISHED, publishedAt: new Date() }, { new: true })
+      .exec();
+    if (!published) {
+      throw new NotFoundException('Post not found');
+    }
+    return published;
+  }
+}
+```
+
+สร้าง `apps/api/src/posts/posts.resolver.ts`:
+
+```ts
+import { NotFoundException, UseGuards } from '@nestjs/common';
+import { Args, ID, Int, Mutation, Parent, Query, ResolveField, Resolver } from '@nestjs/graphql';
+import { PostsService, PostsPageResult } from './posts.service';
+import { UsersService } from '../users/users.service';
+import { Post } from './models/post.model';
+import { PostPage } from './models/post-page.model';
+import { PostStatus } from './enums/post-status.enum';
+import { CreatePostInput } from './dto/create-post.input';
+import { UpdatePostInput } from './dto/update-post.input';
+import { User } from '../users/models/user.model';
+import { PostDocument } from './schemas/post.schema';
+import { GqlAuthGuard } from '../auth/gql-auth.guard';
+import { RolesGuard } from '../auth/roles.guard';
+import { Roles } from '../auth/roles.decorator';
+import { CurrentUser } from '../auth/current-user.decorator';
+
+interface AuthenticatedUser {
+  userId: string;
+  email: string;
+  role: 'author' | 'admin';
+}
+
+@Resolver(() => Post)
+export class PostsResolver {
+  constructor(
+    private readonly postsService: PostsService,
+    private readonly usersService: UsersService,
+  ) {}
+
+  @Query(() => PostPage)
+  posts(
+    @Args('status', { type: () => PostStatus, nullable: true }) status?: PostStatus,
+    @Args('tag', { type: () => String, nullable: true }) tag?: string,
+    @Args('page', { type: () => Int, nullable: true }) page?: number,
+    @Args('pageSize', { type: () => Int, nullable: true }) pageSize?: number,
+  ): Promise<PostsPageResult> {
+    return this.postsService.findPage({ status, tag, page, pageSize });
+  }
+
+  @Query(() => Post, { nullable: true })
+  post(@Args('slug', { type: () => String }) slug: string): Promise<PostDocument | null> {
+    return this.postsService.findBySlug(slug);
+  }
+
+  @Mutation(() => Post)
+  @UseGuards(GqlAuthGuard)
+  createPost(
+    @Args('input') input: CreatePostInput,
+    @CurrentUser() currentUser: AuthenticatedUser,
+  ): Promise<PostDocument> {
+    return this.postsService.create(currentUser.userId, input);
+  }
+
+  @Mutation(() => Post)
+  @UseGuards(GqlAuthGuard)
+  updatePost(
+    @Args('id', { type: () => ID }) id: string,
+    @Args('input') input: UpdatePostInput,
+  ): Promise<PostDocument> {
+    return this.postsService.update(id, input);
+  }
+
+  @Mutation(() => Post)
+  @UseGuards(GqlAuthGuard)
+  publishPost(@Args('id', { type: () => ID }) id: string): Promise<PostDocument> {
+    return this.postsService.publish(id);
+  }
+
+  @Mutation(() => Post)
+  @UseGuards(GqlAuthGuard, RolesGuard)
+  @Roles('admin')
+  deletePost(@Args('id', { type: () => ID }) id: string): Promise<PostDocument> {
+    return this.postsService.remove(id);
+  }
+
+  @ResolveField(() => User)
+  async author(@Parent() post: PostDocument): Promise<User> {
+    const author = await this.usersService.findById(post.author.toString());
+    if (!author) {
+      throw new NotFoundException('Author not found');
+    }
+    return {
+      id: author.id,
+      email: author.email,
+      displayName: author.displayName,
+      role: author.role,
+    };
+  }
+}
+```
+
+- **`posts`** สร้าง filter จาก argument `status`/`tag` ที่ผู้เรียกใส่มาจริง ๆ เท่านั้น — การไม่ใส่ `status` จะคืนโพสต์ทุก status ซึ่งถูกต้องสำหรับ listing ฝั่ง admin แต่ไม่ใช่สิ่งที่หน้าเว็บสาธารณะควรทำเลย [Public Blog](/devblog/th/public-blog/) มีหน้าที่ใส่ `status: PUBLISHED` เสมอฝั่งที่ผู้อ่านเห็น ตัว resolver เองยังคงเป็น filter ธรรมดาไม่มีความเห็นเป็นของตัวเอง
+- **`createPost`** อ่านผู้เรียกจาก `@CurrentUser()` decorator เดียวกับที่ [Auth resolver & GraphQL setup](/devblog/th/auth/auth-resolver/) ใช้กับ `me` — author ของโพสต์คือเจ้าของ token เสมอ ไม่ใช่ field ที่ client ส่งมาเอง นี่คือเหตุผลที่ `CreatePostInput` ไม่มี field `author` เลย
+- **`updatePost`/`publishPost`/`deletePost`** ทั้งหมด resolve หรือ throw ผ่าน `NotFoundException` ของ `PostsService` เอง — resolver ไม่เพิ่มการจัดการ error ของตัวเอง ตรงกับกฎ "throw exception ของ Nest ที่มีอยู่แล้ว ให้ global filter จัดรูปแบบ response" จาก [Config & exceptions](/devblog/th/backend-foundations/config-exceptions/)
+- **`author`** เป็น method เดียวที่นี่ที่ไม่ใช่ `@Query()`/`@Mutation()` — `@ResolveField(() => User)` จะรันก็ต่อเมื่อ selection set ของ request มี `author` อยู่เท่านั้น และ `@Parent()` ส่ง `Post` document ตัวเดียวกับที่ operation หลักดึงมาแล้วให้มันพอดี พร้อม `post.author`
+
+อัปเดต `apps/api/src/posts/posts.module.ts` เพื่อลงทะเบียน resolver และ import `UsersModule` (ที่ export `UsersService` ไว้แล้วตั้งแต่ [Password hashing](/devblog/th/auth/passwords/)):
+
+```ts
+import { Module } from '@nestjs/common';
+import { MongooseModule } from '@nestjs/mongoose';
+import { Post, PostSchema } from './schemas/post.schema';
+import { PostsService } from './posts.service';
+import { PostsResolver } from './posts.resolver';
+import { UsersModule } from '../users/users.module';
+
+@Module({
+  imports: [
+    MongooseModule.forFeature([{ name: Post.name, schema: PostSchema }]),
+    UsersModule,
+  ],
+  providers: [PostsService, PostsResolver],
+})
+export class PostsModule {}
+```
+
+`onModuleInit` boot check ชั่วคราวของ `PostsService` จาก [Mongoose connection](/devblog/th/backend-foundations/mongoose-connection/) เอาออกได้แล้วตอนนี้ — `posts`, `post` และ mutation ทั้งสี่ด้านล่างคือของจริงที่ทดสอบผ่าน playground ได้ มาแทนที่มัน เหมือนกับที่ [Auth resolver & GraphQL setup](/devblog/th/auth/auth-resolver/) ทำกับ hook แบบเดียวกันของ `AuthService`
+
+## Verify
+
+```bash
+npm run start:dev
+```
+
+เปิด `http://localhost:4000/graphql` วาง header `Authorization: Bearer <token>` จาก mutation `register`/`login` ([Auth resolver & GraphQL setup](/devblog/th/auth/auth-resolver/)) ลงในแผง **Headers** ของ Sandbox แล้วรัน:
+
+```graphql
+mutation CreatePost {
+  createPost(
+    input: {
+      title: "Hello, DevBlog"
+      body: "This is the first post."
+      tags: ["nestjs", "graphql"]
+    }
+  ) {
+    id
+    slug
+    status
+    author {
+      displayName
+    }
+  }
+}
+```
+
+```txt
+{
+  "data": {
+    "createPost": {
+      "id": "...",
+      "slug": "hello-devblog",
+      "status": "DRAFT",
+      "author": { "displayName": "Ava" }
+    }
+  }
+}
+```
+
+`author.displayName` ใน response ยืนยันว่า `@ResolveField()` รันแล้ว และ `UsersService.findById` resolve `ObjectId` กลับมาเป็น `User` จริง ทีนี้ลองรัน query เดิมโดยไม่มี header `Authorization` เลย:
+
+```graphql
+query Posts {
+  posts {
+    total
+    items {
+      title
+      status
+    }
+  }
+}
+```
+
+```txt
+{
+  "data": {
+    "posts": {
+      "total": 1,
+      "items": [{ "title": "Hello, DevBlog", "status": "DRAFT" }]
+    }
+  }
+}
+```
+
+`posts` สำเร็จโดยไม่มี token เลย ยืนยันว่ามันเปิดสาธารณะจริง ๆ ต่างจาก `createPost` ด้านบน ลองรัน `deletePost` ด้วย token ของ author คนเดิมที่ใช้กับ `createPost` แล้วมันจะล้มเหลว — account นั้นมี `role` เป็น `'author'` ไม่ใช่ `'admin'` ดังนั้น `RolesGuard` จึงปฏิเสธมัน ยืนยันว่าการตรวจ role ของ [Guards & roles](/devblog/th/auth/guards-roles/) ทำงานจริงบน mutation จริงแล้ว
+
+## Recap
+
+`PostsService` ตอนนี้มี CRUD ครบพร้อม `findPage`/`findBySlug` หนุนหลังด้วย Mongoose schema `Post` จาก [Schemas](/devblog/th/data-modeling/schemas/) `PostsResolver` เปิด `posts`/`post` เป็น query สาธารณะ และ `createPost`/`updatePost`/`publishPost` อยู่หลัง `GqlAuthGuard` โดย `deletePost` ถูกจำกัดเพิ่มเติมให้เฉพาะ `admin` ผ่าน `RolesGuard` กับ `@Roles('admin')` `@ResolveField(() => User) author` เชื่อมการอ้างอิงแบบ `ObjectId` ของ `Post.author` ให้เป็น object `User` จริงต่อ request — ราคาถูกที่สเกลของคอร์สนี้ แต่เป็นความเสี่ยง N+1 จริงเมื่อมี traffic แบบ list จริง ซึ่งนั่นคือสิ่งที่ DataLoader มีไว้เพื่อรวมมันเป็น batch เดียว
+
+Next: [Tags resolver →](/devblog/th/graphql-api/tags-resolver/)

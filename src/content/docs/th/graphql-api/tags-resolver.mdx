@@ -1,0 +1,240 @@
+---
+title: Tags resolver
+description: "TagsService และ TagsResolver — ดึงรายการและสร้าง tag พร้อมวิธีที่ Post อ้างอิง tag ของมันด้วย slug แทนที่จะเป็นความสัมพันธ์จริง"
+sidebar:
+  order: 3
+---
+
+## What we're building
+
+`TagsModule`, `apps/api/src/tags/tags.service.ts` (`TagsService`) และ `apps/api/src/tags/tags.resolver.ts` (`TagsResolver`) — เป็นครั้งแรกที่ `TagsModule` มีอยู่จริงในคอร์สนี้ [Mongoose connection](/devblog/th/backend-foundations/mongoose-connection/) เอ่ยชื่อมันไว้แล้วว่าเป็นหนึ่งใน feature module ที่จะตามรูปทรงของ `PostsModule` "ทีหลังในคอร์ส" และนี่คือบทเรียนนั้น มันใช้ schema `Tag` จาก [Schemas](/devblog/th/data-modeling/schemas/) และ GraphQL type `Tag` จาก [Code-first basics](/devblog/th/graphql-api/code-first-basics/)
+
+## Why
+
+`tags` เป็น query สาธารณะที่ไม่มี guard — เหตุผลเดียวกับที่ `posts`/`post` ใน [Posts resolver](/devblog/th/graphql-api/posts-resolver/) อธิบายไว้แล้วก็ใช้ได้ที่นี่: การอ่านรายการ tag ไม่ใช่ข้อมูลหวงห้าม และหน้า tag ของเว็บสาธารณะ ([Public Blog](/devblog/th/public-blog/)) ต้องการมันโดยไม่มี session เลย `createTag` ต้องการเพียง `@UseGuards(GqlAuthGuard)` — ผู้เขียนที่ล็อกอินแล้วคนไหนก็สร้าง tag ใหม่ได้ตอนเขียนโพสต์ ตรงกับจุดยืน "ผู้ใช้ที่ล็อกอินแล้วคนไหนก็เขียนได้" ของ `createPost` จากบทเรียนก่อนหน้า ไม่ใช่จุดยืนแบบ admin-only ของ `deletePost`
+
+`Post.tags` เป็น `string[]` ธรรมดาของ *slug* ของ tag — [Schemas](/devblog/th/data-modeling/schemas/) ทำเครื่องหมายไว้แล้วว่านี่คือ field ที่จงใจ denormalize ด้วยเส้น `}o..o{` แบบจุดใน ER diagram ของมัน ไม่ใช่ `ref` แบบ Mongoose จริง นั่นหมายความว่าการสร้าง document `Tag` กับการเพิ่ม slug ของมันเข้าไปใน `Post.tags` array ใด ๆ เป็นการเขียนสองครั้งที่เป็นอิสระต่อกันโดยสิ้นเชิง — ไม่มีอะไรใน MongoDB บังคับว่า slug ที่ปรากฏใน `Post.tags` ต้องมี document `Tag` จริงคู่กันด้วย หรือกลับกัน การที่ `TagsService.create` slugify `name` ด้วยวิธีเดียวกับที่ `PostsService.create` slugify `title` (บทเรียนก่อนหน้า) คือสิ่งที่ทำให้ทั้งสอง collection พูดรูปแบบ slug เดียวกัน `posts(tag: "nestjs")` ใน [Pagination](/devblog/th/graphql-api/pagination/) filter ด้วย string เดียวกันนี้เป๊ะ
+
+## Pros & cons
+
+**การปฏิเสธชื่อ tag ที่ซ้ำด้วย `ConflictException` เทียบกับการคืนค่า tag ที่มีอยู่แล้วเงียบ ๆ** `TagsService.create` throw `409` เมื่อชื่อที่ slugify แล้วตรงกับสิ่งที่มีอยู่แล้วใน collection ทางเลือกเดียวกับที่ `UsersService.create` เคยเลือกไว้แล้วสำหรับอีเมลที่ซ้ำใน [Password hashing](/devblog/th/auth/passwords/) — พฤติกรรมที่สอดคล้องกันทั้งแอปสำหรับ "คุณพยายามสร้างสิ่งที่มีอยู่แล้ว" แลกมาด้วยการที่ client ต้อง catch error นั้นแล้ว fallback ไปใช้ tag ที่มีอยู่แล้วเอง (การ lookup ที่บทเรียนนี้ไม่ได้เพิ่ม query ให้ เพราะ `tags` คืนรายการทั้งหมดอยู่แล้ว) ทางเลือกอื่น — คืน document `Tag` ที่มีอยู่แล้วแทนการ error — อ่านดูสะดวกกว่าสำหรับผู้เรียกแบบ "create-if-missing" แต่นั่นหมายความว่า `createTag` จะแยกไม่ออกอีกต่อไปว่า "คุณสร้างสิ่งใหม่" หรือ "สิ่งนี้มีอยู่แล้ว" ซึ่งสำคัญถ้าผู้เรียกต้องรู้ว่าเกิดอะไรขึ้น (เช่น จะโชว์ toast "เพิ่ม tag ใหม่แล้ว" เฉพาะตอนสร้างจริง ๆ เท่านั้น)
+
+## Set it up
+
+สร้าง `apps/api/src/tags/tags.service.ts`:
+
+```ts
+import { ConflictException, Injectable } from '@nestjs/common';
+import { InjectModel } from '@nestjs/mongoose';
+import { Model } from 'mongoose';
+import { Tag, TagDocument } from './schemas/tag.schema';
+
+@Injectable()
+export class TagsService {
+  constructor(
+    @InjectModel(Tag.name) private readonly tagModel: Model<TagDocument>,
+  ) {}
+
+  findAll(): Promise<TagDocument[]> {
+    return this.tagModel.find().sort({ name: 1 }).exec();
+  }
+
+  async create(name: string): Promise<TagDocument> {
+    // TODO(Content Workflow): a shared slugify() util replaces this inline copy —
+    // see the identical placeholder in PostsService.create.
+    const slug = name
+      .toLowerCase()
+      .trim()
+      .replace(/[^a-z0-9]+/g, '-')
+      .replace(/(^-|-$)/g, '');
+
+    const existing = await this.tagModel.findOne({ slug }).exec();
+    if (existing) {
+      throw new ConflictException(`Tag "${name}" already exists`);
+    }
+
+    const created = new this.tagModel({ name, slug });
+    return created.save();
+  }
+}
+```
+
+สร้าง `apps/api/src/tags/tags.resolver.ts`:
+
+```ts
+import { UseGuards } from '@nestjs/common';
+import { Args, Mutation, Query, Resolver } from '@nestjs/graphql';
+import { TagsService } from './tags.service';
+import { Tag } from './models/tag.model';
+import { TagDocument } from './schemas/tag.schema';
+import { GqlAuthGuard } from '../auth/gql-auth.guard';
+
+@Resolver(() => Tag)
+export class TagsResolver {
+  constructor(private readonly tagsService: TagsService) {}
+
+  @Query(() => [Tag])
+  tags(): Promise<TagDocument[]> {
+    return this.tagsService.findAll();
+  }
+
+  @Mutation(() => Tag)
+  @UseGuards(GqlAuthGuard)
+  createTag(@Args('name', { type: () => String }) name: string): Promise<TagDocument> {
+    return this.tagsService.create(name);
+  }
+}
+```
+
+- **`tags`** ไม่รับ argument เลยและไม่ต้องการด้วย — collection ทั้งหมดคาดว่าจะเล็กอยู่เสมอ (คลังคำ tag ของบล็อก ไม่ใช่จำนวนโพสต์) จึงไม่มี pagination ที่นี่แบบที่ [Pagination](/devblog/th/graphql-api/pagination/) เพิ่มให้ `posts`
+- **`createTag`** รับ argument `name: String!` เปล่า ๆ ไม่ใช่ `CreateTagInput` — scalar เดียวที่ required ไม่คุ้มที่จะมี `@InputType()` ของตัวเองแบบที่ field ทั้งห้าของ `CreatePostInput` มี การสร้าง input type ตรงนี้จะเป็นแค่พิธีกรรมเกินความจำเป็นสำหรับ string เดียว
+- ไม่มี method ไหนมี `@ResolveField()` เลย — `Tag` ไม่มีความสัมพันธ์ให้ resolve ต่างจาก `Post.author` ใน [Posts resolver](/devblog/th/graphql-api/posts-resolver/) ที่ต้องมีเพราะมันอ้างอิง entity อื่นด้วย `ObjectId` พอดี
+
+สร้าง `apps/api/src/tags/tags.module.ts`:
+
+```ts
+import { Module } from '@nestjs/common';
+import { MongooseModule } from '@nestjs/mongoose';
+import { Tag, TagSchema } from './schemas/tag.schema';
+import { TagsService } from './tags.service';
+import { TagsResolver } from './tags.resolver';
+
+@Module({
+  imports: [MongooseModule.forFeature([{ name: Tag.name, schema: TagSchema }])],
+  providers: [TagsService, TagsResolver],
+})
+export class TagsModule {}
+```
+
+ลงทะเบียน `TagsModule` ใน `apps/api/src/app.module.ts` ควบคู่กับ `PostsModule`, `UsersModule` และ `AuthModule`:
+
+```ts
+import { join } from 'node:path';
+import { Module } from '@nestjs/common';
+import { ConfigModule, ConfigService } from '@nestjs/config';
+import { MongooseModule } from '@nestjs/mongoose';
+import { GraphQLModule } from '@nestjs/graphql';
+import { ApolloDriver, ApolloDriverConfig } from '@nestjs/apollo';
+import { ApolloServerPluginLandingPageLocalDefault } from '@apollo/server/plugin/landingPage/default';
+import { Logger } from '@nestjs/common';
+import { Connection } from 'mongoose';
+import * as Joi from 'joi';
+import { AppController } from './app.controller';
+import { AppService } from './app.service';
+import { PostsModule } from './posts/posts.module';
+import { UsersModule } from './users/users.module';
+import { AuthModule } from './auth/auth.module';
+import { TagsModule } from './tags/tags.module';
+
+@Module({
+  imports: [
+    ConfigModule.forRoot({
+      isGlobal: true,
+      envFilePath: '../../.env',
+      validationSchema: Joi.object({
+        MONGODB_URI: Joi.string().uri().required(),
+        JWT_SECRET: Joi.string().min(10).required(),
+        API_PORT: Joi.number().port().default(4000),
+        WEB_ORIGIN: Joi.string().uri().required(),
+      }),
+      validationOptions: {
+        allowUnknown: true,
+        abortEarly: false,
+      },
+    }),
+    MongooseModule.forRootAsync({
+      inject: [ConfigService],
+      useFactory: (configService: ConfigService) => ({
+        uri: configService.getOrThrow<string>('MONGODB_URI'),
+        onConnectionCreate: (connection: Connection) => {
+          connection.on('connected', () =>
+            new Logger('MongooseModule').log('MongoDB connected'),
+          );
+          return connection;
+        },
+      }),
+    }),
+    GraphQLModule.forRoot<ApolloDriverConfig>({
+      driver: ApolloDriver,
+      autoSchemaFile: join(process.cwd(), 'src/schema.gql'),
+      sortSchema: true,
+      playground: false,
+      plugins: [ApolloServerPluginLandingPageLocalDefault()],
+      context: ({ req }) => ({ req }),
+    }),
+    PostsModule,
+    UsersModule,
+    AuthModule,
+    TagsModule,
+  ],
+  controllers: [AppController],
+  providers: [AppService],
+})
+export class AppModule {}
+```
+
+## Verify
+
+```bash
+npm run start:dev
+```
+
+โดยมี header `Authorization` จาก mutation `login`/`register` วางอยู่ในแผง **Headers** ของ Sandbox ต่อไป:
+
+```graphql
+mutation CreateTag {
+  createTag(name: "NestJS") {
+    id
+    name
+    slug
+  }
+}
+```
+
+```txt
+{
+  "data": {
+    "createTag": { "id": "...", "name": "NestJS", "slug": "nestjs" }
+  }
+}
+```
+
+รัน mutation เดิมอีกครั้งด้วยชื่อเดียวกันแล้วมันจะล้มเหลวด้วย GraphQL error ที่มี `409` — `ConflictException` ของ `TagsService.create` ยืนยันว่า guard กันชื่อ slug ซ้ำทำงานอยู่จริง จากนั้นรัน:
+
+```graphql
+query Tags {
+  tags {
+    name
+    slug
+  }
+}
+```
+
+```txt
+{
+  "data": {
+    "tags": [{ "name": "NestJS", "slug": "nestjs" }]
+  }
+}
+```
+
+`tags` สำเร็จโดยไม่มี header `Authorization` เลย ยืนยันว่ามันเปิดสาธารณะจริง ๆ สุดท้าย filter query `posts` ของ [Posts resolver](/devblog/th/graphql-api/posts-resolver/) ด้วย slug ตัวนี้เป๊ะ:
+
+```graphql
+query PostsByTag {
+  posts(tag: "nestjs") {
+    total
+    items {
+      title
+    }
+  }
+}
+```
+
+โพสต์ที่สร้างด้วย `tags: ["nestjs", ...]` ในบทเรียนก่อนหน้าจะกลับมา — ยืนยันว่า `Post.tags` กับ `Tag.slug` ตกลงกันบน string เดียวกัน แม้ว่าจะไม่มีอะไรใน MongoDB บังคับความตกลงนั้นโดยตรงเลย
+
+## Recap
+
+`TagsService.findAll`/`create` หนุนหลัง query `tags` ที่เปิดสาธารณะเต็มที่ และ mutation `createTag` ที่มี guard คุ้มกัน จุดยืนเดียวกับ "ผู้ใช้ที่ล็อกอินแล้วคนไหนก็เขียนได้ ไม่ต้องมี role" ที่ `createPost` เคยยึดไว้ในบทเรียนก่อนหน้า `TagsResolver` ไม่มี `@ResolveField()` เลย — ต่างจาก `Post.author`, `Tag` ไม่มีการอ้างอิงไปยัง entity อื่นให้เชื่อม `TagsService.create` slugify `name` ด้วย logic ชั่วคราวเดียวกับที่ `PostsService.create` ใช้กับ `title` ทำให้ `Post.tags` (`string[]` ของ slug ที่ denormalize ไว้ ไม่ใช่ความสัมพันธ์จริง) กับ collection `Tag` พูดรูปแบบ slug เดียวกันไปจนกว่า [Content Workflow](/devblog/th/content-workflow/) จะแทนที่ทั้งคู่ด้วย `slugify()` ที่ใช้ร่วมกันและจัดการการชนกันได้จริง
+
+Next: [Pagination →](/devblog/th/graphql-api/pagination/)

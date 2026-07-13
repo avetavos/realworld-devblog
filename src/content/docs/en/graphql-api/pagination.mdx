@@ -1,0 +1,103 @@
+---
+title: Pagination
+description: "PostPage's offset pagination — skip/limit plus countDocuments — and the trade-offs against cursor-based pagination."
+sidebar:
+  order: 4
+---
+
+## What we're building
+
+Nothing new — this lesson is a close read of `PostsService.findPage` and the `PostPage` type, both already written in [Code-first basics](/devblog/en/graphql-api/code-first-basics/) and [Posts resolver](/devblog/en/graphql-api/posts-resolver/). The code is unchanged; what's new here is naming the pattern (**offset pagination**) and weighing it against the alternative (**cursor pagination**) deliberately, instead of leaving it as an implicit choice baked into `findPage`'s signature.
+
+## Why
+
+`findPage({ status?, tag?, page = 1, pageSize = 10 })` turns a `page`/`pageSize` pair into a MongoDB `skip`/`limit` pair: `skip = (page - 1) * pageSize` counts how many matching documents to discard before starting to collect results, and `limit(pageSize)` caps how many to return. `total` comes from a second, independent query — `countDocuments(filter)` — run with `Promise.all` alongside the `find()` so the two round-trips overlap instead of running one after the other; both queries share the exact same `filter` object, so `total` always describes the same matching set `items` is a page of, never a mismatched "total across everything" while `items` reflects a `status`/`tag` filter.
+
+`PostPage { items, total, page, pageSize }` gives a client everything needed to render a page-number UI without a second request: `Math.ceil(total / pageSize)` is the last page number, and `page < Math.ceil(total / pageSize)` tells a "Next" button whether to enable itself — all computable client-side from one response.
+
+## Pros & cons
+
+**Offset pagination (`skip`/`limit`, what `findPage` does) vs. cursor pagination (`after: <opaque token>`, `first: N`).** Offset pagination is simple to reason about and simple to build a UI for: "page 3 of 12," jump straight to page 7, show a full page-number strip — all of that needs an absolute position (`page`), which only offset pagination gives you directly. Its real cost shows up under concurrent writes: `skip(20)` means "skip the first 20 documents matching the current query, in the current sort order," and if a new post is created (or an existing one's `status` changes) between a reader loading page 1 and requesting page 2, the collection's matching set has shifted — an item can be skipped entirely or shown twice, because `skip` counts positions in a set that isn't stable across two separate queries. `countDocuments` also becomes measurably slower as a collection grows into the millions, since MongoDB still has to walk every matching document to produce that count, even though `find` only returns one page of them.
+
+Cursor pagination sidesteps both problems by replacing an absolute position with a pointer to a specific document — typically its `_id`, or a compound `(createdAt, _id)` tiebreaker for a sorted feed — and querying `_id > lastSeenId` (or the sort-field equivalent) instead of counting from the start every time. That query is stable under concurrent inserts, because it never depends on how many documents currently precede the cursor, only on which document comes after it. The cost is real too: no "jump to page 7" (a cursor only knows how to move one step relative to itself), and no cheap `total` (the exact reasons a live count is admissible for `total` are the same reasons it's not for a cursor's own boundary check).
+
+DevBlog's blog feed and admin post list are both read far more than they're concurrently written to mid-scroll by the same user, and a "page 3 of 12" admin UI is a genuinely useful thing to have — offset pagination is the right choice here, with the understanding that a comment thread growing in real time under a reader (added in [Comments](/devblog/en/comments/)) or any feed expected to scale past what one `countDocuments` call can afford would be the signal to revisit cursor pagination for that specific query, not this one.
+
+## Set it up
+
+Nothing to change — `findPage` and `PostPage` already implement everything above:
+
+```ts
+async findPage(options: FindPostsPageOptions = {}): Promise<PostsPageResult> {
+  const { status, tag, page = 1, pageSize = 10 } = options;
+  const filter: Record<string, unknown> = {};
+  if (status) {
+    filter.status = status;
+  }
+  if (tag) {
+    filter.tags = tag;
+  }
+
+  const skip = (page - 1) * pageSize;
+  const [items, total] = await Promise.all([
+    this.postModel.find(filter).sort({ createdAt: -1 }).skip(skip).limit(pageSize).exec(),
+    this.postModel.countDocuments(filter).exec(),
+  ]);
+
+  return { items, total, page, pageSize };
+}
+```
+
+- **`sort({ createdAt: -1 })`** matters as much as `skip`/`limit` do — offset pagination is only coherent against a stable sort order; without one, MongoDB is free to return matching documents in a different relative order on two separate calls, and `skip(10)` on an unordered set doesn't mean anything close to "the 11th newest post."
+- **`Promise.all`** overlaps `find()` and `countDocuments()` — they're independent reads against the same `filter`, so there's no reason to `await` one before starting the other.
+
+## Verify
+
+```bash
+npm run start:dev
+```
+
+Seed a few posts with `createPost` from [Posts resolver](/devblog/en/graphql-api/posts-resolver/), then request the second page at a page size of 10:
+
+```graphql
+query PostsPageTwo {
+  posts(page: 2, pageSize: 10) {
+    total
+    page
+    pageSize
+    items {
+      title
+      createdAt
+    }
+  }
+}
+```
+
+With 15 posts in the collection, page 2 returns the remaining 5, oldest-first-within-the-page (still newest-overall-first, since `sort({ createdAt: -1 })` never changes):
+
+```txt
+{
+  "data": {
+    "posts": {
+      "total": 15,
+      "page": 2,
+      "pageSize": 10,
+      "items": [
+        { "title": "Post #6", "createdAt": "2026-01-01T09:00:00.000Z" },
+        { "title": "Post #5", "createdAt": "2026-01-01T08:00:00.000Z" },
+        { "title": "Post #4", "createdAt": "2026-01-01T07:00:00.000Z" },
+        { "title": "Post #3", "createdAt": "2026-01-01T06:00:00.000Z" },
+        { "title": "Post #2", "createdAt": "2026-01-01T05:00:00.000Z" }
+      ]
+    }
+  }
+}
+```
+
+`total: 15` confirms `countDocuments` ran against every matching document, not just the returned page; `items.length === 5` confirms `skip(10).limit(10)` correctly returned only what was left after the first 10.
+
+## Recap
+
+`PostPage`'s `items`/`total`/`page`/`pageSize` shape is offset pagination end to end: `skip`/`limit` computed from `page`/`pageSize`, and an independent `countDocuments` sharing the same `filter` so `total` and `items` always describe the same matching set. It's the right default for DevBlog's mostly-read, page-numbered lists, at the cost of instability under concurrent writes and an increasingly expensive `total` at large scale — the two reasons a heavier-traffic, real-time feed would reach for cursor pagination instead.
+
+Next: [Content Workflow →](/devblog/en/content-workflow/)

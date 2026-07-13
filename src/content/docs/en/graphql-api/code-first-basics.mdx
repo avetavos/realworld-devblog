@@ -1,0 +1,184 @@
+---
+title: Code-first basics
+description: "Formalize @ObjectType/@Field, @Resolver/@Query/@Mutation/@Args/@InputType, and registerEnumType — then see the SDL autoSchemaFile generates from the Post, Tag, PostPage, and PostStatus types."
+sidebar:
+  order: 1
+---
+
+## What we're building
+
+Four files that give this module's data a GraphQL shape, without a single resolver yet: `apps/api/src/posts/enums/post-status.enum.ts` (`PostStatus`, registered with `registerEnumType`), `apps/api/src/posts/models/post.model.ts` (`Post`), `apps/api/src/posts/models/post-page.model.ts` (`PostPage`), and `apps/api/src/tags/models/tag.model.ts` (`Tag`). [Auth resolver & GraphQL setup](/devblog/en/auth/auth-resolver/) already used `@ObjectType()`/`@Field()` for `User` and `@InputType()` for `RegisterInput`/`LoginInput` — this lesson names the pattern properly and adds the two decorators that lesson didn't need: `registerEnumType` and the field-level options (`nullable`, list types) that a real content model requires.
+
+## Why
+
+**Code-first** means the GraphQL schema is *generated* from decorated TypeScript classes — `@ObjectType()` marks a class as a GraphQL object type, `@Field()` marks a property as one of its fields, `@InputType()` does the same for a mutation argument shape, and `@Resolver()`/`@Query()`/`@Mutation()`/`@Args()` (next lesson) wire up the operations that return and accept those types. `GraphQLModule.forRoot`'s `autoSchemaFile` option, set up in [Auth resolver & GraphQL setup](/devblog/en/auth/auth-resolver/), reads all of this decorator metadata at boot and writes the resulting SDL to `apps/api/src/schema.gql` — that file is a build artifact of the classes below, never something to hand-edit.
+
+`@Field()` needs an explicit type function, `@Field(() => X)`, whenever TypeScript's own type can't be reflected directly — a `string`, `number` (as `Int` — see below), or `boolean` property is inferred automatically, but a list (`@Field(() => [String])` for `tags: string[]`), a reference to another `@ObjectType()` (`@Field(() => User)` for `author: User`), or an `ID`/enum type all need it spelled out. `{ nullable: true }` marks a field optional in the schema — TypeScript's own `?` on the property is a compile-time-only hint and has no effect on the generated SDL by itself.
+
+A TypeScript `enum` isn't picked up by `@Field()` alone — `registerEnumType(PostStatus, { name: 'PostStatus' })` is a one-time call (run once, at module load, right where the enum is declared) that tells the schema builder this enum exists and what to name it in the SDL. One subtlety worth flagging up front: the SDL enum's values are the TypeScript member *names* (`DRAFT`, `PUBLISHED`), not their underlying string values (`'draft'`, `'published'`) — a client writes `status: DRAFT` in a query, while the resolver and `PostsService` beneath it keep working with the exact same `'draft'` string [Schemas](/devblog/en/data-modeling/schemas/) already put in `Post.status`. Nothing needs mapping between the two by hand; that translation is what `registerEnumType` sets up.
+
+A `Date`-typed property needs no special scalar import to work at all — `@nestjs/graphql`'s code-first mode ships five built-in scalars (`ID`, `Int`, `Float`, and two `Date` representations), and maps a plain `Date` field to `GraphQLISODateTime` (named `DateTime` in the generated SDL) automatically. `createdAt`, `updatedAt`, and `publishedAt` below need nothing beyond a bare `@Field()`.
+
+## Pros & cons
+
+**Code-first vs. schema-first.** Schema-first means hand-writing a `.graphql` SDL file first, then implementing resolver methods that must independently match its shape — the SDL is the single source of truth, but nothing stops a resolver's TypeScript return type from silently drifting out of sync with it; that mismatch is only caught at runtime, by a client seeing a field come back `null` or missing. Code-first inverts this: the decorated class is the only source of truth, the SDL is a generated artifact, and a resolver method whose return type doesn't structurally satisfy an `@ObjectType()` is a TypeScript compile error, not a runtime surprise. The cost is real too — code-first ties the schema definition to whichever language and framework generates it, so a schema-first `.graphql` file (portable, toolable, readable without opening any code) is the better choice for a team that treats the schema itself as a cross-team contract negotiated independently of any one service's implementation. DevBlog is a single NestJS API owning its whole schema, which is exactly the case code-first is built for.
+
+## Set it up
+
+Create `apps/api/src/posts/enums/post-status.enum.ts`:
+
+```ts
+import { registerEnumType } from '@nestjs/graphql';
+
+export enum PostStatus {
+  DRAFT = 'draft',
+  PUBLISHED = 'published',
+}
+
+registerEnumType(PostStatus, {
+  name: 'PostStatus',
+  description: "Publication status of a post — mirrors Post.status from Data Modeling.",
+});
+```
+
+Create `apps/api/src/posts/models/post.model.ts`:
+
+```ts
+import { Field, ID, ObjectType } from '@nestjs/graphql';
+import { User } from '../../users/models/user.model';
+import { PostStatus } from '../enums/post-status.enum';
+
+@ObjectType()
+export class Post {
+  @Field(() => ID)
+  id: string;
+
+  @Field()
+  title: string;
+
+  @Field()
+  slug: string;
+
+  @Field()
+  body: string;
+
+  @Field({ nullable: true })
+  excerpt?: string;
+
+  @Field({ nullable: true })
+  coverImage?: string;
+
+  @Field(() => PostStatus)
+  status: PostStatus;
+
+  @Field(() => [String])
+  tags: string[];
+
+  @Field({ nullable: true })
+  publishedAt?: Date;
+
+  @Field()
+  createdAt: Date;
+
+  @Field()
+  updatedAt: Date;
+
+  @Field(() => User)
+  author: User;
+}
+```
+
+Create `apps/api/src/posts/models/post-page.model.ts`:
+
+```ts
+import { Field, Int, ObjectType } from '@nestjs/graphql';
+import { Post } from './post.model';
+
+@ObjectType()
+export class PostPage {
+  @Field(() => [Post])
+  items: Post[];
+
+  @Field(() => Int)
+  total: number;
+
+  @Field(() => Int)
+  page: number;
+
+  @Field(() => Int)
+  pageSize: number;
+}
+```
+
+Create `apps/api/src/tags/models/tag.model.ts`:
+
+```ts
+import { Field, ID, ObjectType } from '@nestjs/graphql';
+
+@ObjectType()
+export class Tag {
+  @Field(() => ID)
+  id: string;
+
+  @Field()
+  name: string;
+
+  @Field()
+  slug: string;
+}
+```
+
+- **`Post.author: User`** — declared here as a field, but nothing populates it directly; [Posts resolver](/devblog/en/graphql-api/posts-resolver/) adds a `@ResolveField()` method that resolves it from the `author` `ObjectId` [Schemas](/devblog/en/data-modeling/schemas/) put on the Mongoose `Post`, the same "field declared on the type, resolved by a separate method" split [Auth resolver & GraphQL setup](/devblog/en/auth/auth-resolver/) doesn't need but a real cross-entity reference does.
+- **`PostPage`** carries no logic of its own — it's a plain shape for one query's result (`items`, `total`, `page`, `pageSize`), covered end to end in [Pagination](/devblog/en/graphql-api/pagination/).
+- **`Tag.id`** uses `ID` the same way `Post.id` and `User.id` already do — Mongo's `_id` surfaces through Mongoose's `.id` virtual as a plain string, and `ID` is the GraphQL scalar for "this identifies a thing," distinct from a `String` that happens to hold text.
+
+## Verify
+
+```bash
+npm run start:dev
+```
+
+Boot writes the updated schema to `apps/api/src/schema.gql`. Open it and confirm these four shapes appear, generated from the classes above with no `.graphql` file written by hand:
+
+```graphql
+enum PostStatus {
+  DRAFT
+  PUBLISHED
+}
+
+type Post {
+  id: ID!
+  title: String!
+  slug: String!
+  body: String!
+  excerpt: String
+  coverImage: String
+  status: PostStatus!
+  tags: [String!]!
+  publishedAt: DateTime
+  createdAt: DateTime!
+  updatedAt: DateTime!
+  author: User!
+}
+
+type PostPage {
+  items: [Post!]!
+  total: Int!
+  page: Int!
+  pageSize: Int!
+}
+
+type Tag {
+  id: ID!
+  name: String!
+  slug: String!
+}
+```
+
+Every `!` traces back to the absence of `{ nullable: true }` on the matching `@Field()` — `excerpt`, `coverImage`, and `publishedAt` are the only optional fields on `Post`, exactly matching the `?` properties [Schemas](/devblog/en/data-modeling/schemas/) marked non-`required` on the Mongoose side.
+
+## Recap
+
+`@ObjectType()`/`@Field()` decorate a class into a GraphQL type; `registerEnumType` does the same for a TypeScript `enum`, mapping member names (`DRAFT`) to a schema enum while the underlying string values (`'draft'`) stay untouched for the Mongoose layer underneath. `autoSchemaFile` turns all of it into `schema.gql` at boot — a generated artifact, not hand-written SDL. `Post`, `PostPage`, and `Tag` are now real GraphQL types with no operations attached yet; [Posts resolver](/devblog/en/graphql-api/posts-resolver/) is where `@Resolver()`, `@Query()`, `@Mutation()`, and `@Args()` turn them into a working API.
+
+Next: [Posts resolver →](/devblog/en/graphql-api/posts-resolver/)

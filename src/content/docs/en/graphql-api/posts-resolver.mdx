@@ -1,0 +1,365 @@
+---
+title: Posts resolver
+description: "PostsService and PostsResolver — queries, guarded create/update/publish/delete mutations, and a @ResolveField author that turns an ObjectId ref into a real User."
+sidebar:
+  order: 2
+---
+
+## What we're building
+
+`apps/api/src/posts/posts.service.ts` (`PostsService`, extended with real CRUD on top of the `onModuleInit` boot check from [Mongoose connection](/devblog/en/backend-foundations/mongoose-connection/)) and `apps/api/src/posts/posts.resolver.ts` (`PostsResolver`) — the first resolver that reads and writes real content, using the `Post`/`PostPage`/`PostStatus` types from [Code-first basics](/devblog/en/graphql-api/code-first-basics/) and the guards from [Guards & roles](/devblog/en/auth/guards-roles/). Two new `@InputType()`s, `CreatePostInput` and `UpdatePostInput`, round it out.
+
+## Why
+
+`posts` and `post` are open queries — anyone can read published content without a token, the same way `register`/`login` in [Auth resolver & GraphQL setup](/devblog/en/auth/auth-resolver/) are reachable by anonymous clients. `createPost`, `updatePost`, and `publishPost` require `@UseGuards(GqlAuthGuard)`: any signed-in user can write, matching `Post.author` in [Schemas](/devblog/en/data-modeling/schemas/) being a required reference to *some* `User`, not specifically an admin. `deletePost` is the one operation with a role check, `@UseGuards(GqlAuthGuard, RolesGuard)` plus `@Roles('admin')` — deleting content is destructive enough that DevBlog reserves it for admins, the same reasoning [Guards & roles](/devblog/en/auth/guards-roles/) already worked through for why the two guards stay separate and ordered.
+
+`Post.author` on the Mongoose schema is a `Types.ObjectId` reference, not an embedded `User` snapshot — [Schemas](/devblog/en/data-modeling/schemas/) already explained why. The `Post` GraphQL type, though, declares `author: User`, a real object a client can query fields on (`author { displayName }`). `@ResolveField()` is the bridge: it's a resolver method that only runs when a query actually asks for `author`, receiving the in-flight `Post` via `@Parent()` and returning a real `User` by looking up `post.author` through `UsersService` — the same "one boundary method turns a persistence shape into a wire shape" pattern `AuthResolver.toGraphQLUser` used in [Auth resolver & GraphQL setup](/devblog/en/auth/auth-resolver/), just wired as a field resolver instead of a plain private method, because `author` needs to resolve per-`Post`, not once per request.
+
+That per-`Post` resolution is also this lesson's one real trap. A `posts` query returning 20 posts, each requesting `author { displayName }`, fires 20 separate `usersService.findById` calls — one call per post, all before the response can be assembled — the classic GraphQL **N+1** problem: 1 query for the list, N queries for each item's relation. It's invisible in this lesson's own `Verify` section (one post, one lookup, no way to see the pattern) and only shows up under real list traffic. The fix is **DataLoader**: a per-request cache that batches every `author` lookup fired during one GraphQL execution into a single `findByIds([...])` call, deduplicating repeated IDs automatically. DevBlog doesn't add it in this course — worth knowing for any read this heavy in a real deployment, and worth recognizing the shape of the problem the moment a `@ResolveField()` makes its own database call per parent.
+
+## Pros & cons
+
+**`@ResolveField()` (lazy, looked up per request) vs. embedding an author snapshot on every `Post`.** Looking `author` up through a live reference costs exactly the N+1 risk above, in exchange for `author.displayName` always reflecting the current value — the same trade-off [Schemas](/devblog/en/data-modeling/schemas/) already made at the persistence layer (`ObjectId` ref, not embedded copy) simply surfaces again at the GraphQL layer, because a field resolver can only be as fresh as the reference it resolves.
+
+**Guarding `create`/`update`/`publish` at "any signed-in user" vs. gating them to a specific role.** DevBlog treats `author`/`admin` as roles for read-vs-moderate distinctions, not write-vs-no-write ones — any authenticated user can own and edit their own content, mirroring how a real multi-author blog works. Reserving `deletePost` for `admin` alone is the one place that distinction actually matters: an author who shouldn't be able to permanently remove another author's work is a real access-control requirement worth its own guard, not one lumped in with ordinary editing.
+
+## Set it up
+
+Create `apps/api/src/posts/dto/create-post.input.ts`:
+
+```ts
+import { Field, InputType } from '@nestjs/graphql';
+import { IsArray, IsOptional, IsString, IsUrl, MinLength } from 'class-validator';
+
+@InputType()
+export class CreatePostInput {
+  @Field()
+  @IsString()
+  @MinLength(3)
+  title: string;
+
+  @Field()
+  @IsString()
+  @MinLength(1)
+  body: string;
+
+  @Field({ nullable: true })
+  @IsOptional()
+  @IsString()
+  excerpt?: string;
+
+  @Field({ nullable: true })
+  @IsOptional()
+  @IsUrl()
+  coverImage?: string;
+
+  @Field(() => [String], { nullable: true })
+  @IsOptional()
+  @IsArray()
+  @IsString({ each: true })
+  tags?: string[];
+}
+```
+
+Create `apps/api/src/posts/dto/update-post.input.ts`:
+
+```ts
+import { InputType, PartialType } from '@nestjs/graphql';
+import { CreatePostInput } from './create-post.input';
+
+@InputType()
+export class UpdatePostInput extends PartialType(CreatePostInput) {}
+```
+
+Update `apps/api/src/posts/posts.service.ts`:
+
+```ts
+import { Injectable, NotFoundException } from '@nestjs/common';
+import { InjectModel } from '@nestjs/mongoose';
+import { Model } from 'mongoose';
+import { Post, PostDocument } from './schemas/post.schema';
+import { PostStatus } from './enums/post-status.enum';
+import { CreatePostInput } from './dto/create-post.input';
+import { UpdatePostInput } from './dto/update-post.input';
+
+export interface FindPostsPageOptions {
+  status?: PostStatus;
+  tag?: string;
+  page?: number;
+  pageSize?: number;
+}
+
+export interface PostsPageResult {
+  items: PostDocument[];
+  total: number;
+  page: number;
+  pageSize: number;
+}
+
+@Injectable()
+export class PostsService {
+  constructor(
+    @InjectModel(Post.name) private readonly postModel: Model<PostDocument>,
+  ) {}
+
+  async create(authorId: string, input: CreatePostInput): Promise<PostDocument> {
+    // TODO(Content Workflow): a real slugify() with collision handling lands in
+    // /devblog/en/content-workflow/ — this inline placeholder just keeps `create`
+    // runnable until then.
+    const slug = input.title
+      .toLowerCase()
+      .trim()
+      .replace(/[^a-z0-9]+/g, '-')
+      .replace(/(^-|-$)/g, '');
+    const created = new this.postModel({ ...input, slug, author: authorId });
+    return created.save();
+  }
+
+  async findPage(options: FindPostsPageOptions = {}): Promise<PostsPageResult> {
+    const { status, tag, page = 1, pageSize = 10 } = options;
+    const filter: Record<string, unknown> = {};
+    if (status) {
+      filter.status = status;
+    }
+    if (tag) {
+      filter.tags = tag;
+    }
+
+    const skip = (page - 1) * pageSize;
+    const [items, total] = await Promise.all([
+      this.postModel.find(filter).sort({ createdAt: -1 }).skip(skip).limit(pageSize).exec(),
+      this.postModel.countDocuments(filter).exec(),
+    ]);
+
+    return { items, total, page, pageSize };
+  }
+
+  findBySlug(slug: string): Promise<PostDocument | null> {
+    return this.postModel.findOne({ slug }).exec();
+  }
+
+  findById(id: string): Promise<PostDocument | null> {
+    return this.postModel.findById(id).exec();
+  }
+
+  async update(id: string, input: UpdatePostInput): Promise<PostDocument> {
+    const updated = await this.postModel.findByIdAndUpdate(id, input, { new: true }).exec();
+    if (!updated) {
+      throw new NotFoundException('Post not found');
+    }
+    return updated;
+  }
+
+  async remove(id: string): Promise<PostDocument> {
+    const removed = await this.postModel.findByIdAndDelete(id).exec();
+    if (!removed) {
+      throw new NotFoundException('Post not found');
+    }
+    return removed;
+  }
+
+  async publish(id: string): Promise<PostDocument> {
+    const published = await this.postModel
+      .findByIdAndUpdate(id, { status: PostStatus.PUBLISHED, publishedAt: new Date() }, { new: true })
+      .exec();
+    if (!published) {
+      throw new NotFoundException('Post not found');
+    }
+    return published;
+  }
+}
+```
+
+Create `apps/api/src/posts/posts.resolver.ts`:
+
+```ts
+import { NotFoundException, UseGuards } from '@nestjs/common';
+import { Args, ID, Int, Mutation, Parent, Query, ResolveField, Resolver } from '@nestjs/graphql';
+import { PostsService, PostsPageResult } from './posts.service';
+import { UsersService } from '../users/users.service';
+import { Post } from './models/post.model';
+import { PostPage } from './models/post-page.model';
+import { PostStatus } from './enums/post-status.enum';
+import { CreatePostInput } from './dto/create-post.input';
+import { UpdatePostInput } from './dto/update-post.input';
+import { User } from '../users/models/user.model';
+import { PostDocument } from './schemas/post.schema';
+import { GqlAuthGuard } from '../auth/gql-auth.guard';
+import { RolesGuard } from '../auth/roles.guard';
+import { Roles } from '../auth/roles.decorator';
+import { CurrentUser } from '../auth/current-user.decorator';
+
+interface AuthenticatedUser {
+  userId: string;
+  email: string;
+  role: 'author' | 'admin';
+}
+
+@Resolver(() => Post)
+export class PostsResolver {
+  constructor(
+    private readonly postsService: PostsService,
+    private readonly usersService: UsersService,
+  ) {}
+
+  @Query(() => PostPage)
+  posts(
+    @Args('status', { type: () => PostStatus, nullable: true }) status?: PostStatus,
+    @Args('tag', { type: () => String, nullable: true }) tag?: string,
+    @Args('page', { type: () => Int, nullable: true }) page?: number,
+    @Args('pageSize', { type: () => Int, nullable: true }) pageSize?: number,
+  ): Promise<PostsPageResult> {
+    return this.postsService.findPage({ status, tag, page, pageSize });
+  }
+
+  @Query(() => Post, { nullable: true })
+  post(@Args('slug', { type: () => String }) slug: string): Promise<PostDocument | null> {
+    return this.postsService.findBySlug(slug);
+  }
+
+  @Mutation(() => Post)
+  @UseGuards(GqlAuthGuard)
+  createPost(
+    @Args('input') input: CreatePostInput,
+    @CurrentUser() currentUser: AuthenticatedUser,
+  ): Promise<PostDocument> {
+    return this.postsService.create(currentUser.userId, input);
+  }
+
+  @Mutation(() => Post)
+  @UseGuards(GqlAuthGuard)
+  updatePost(
+    @Args('id', { type: () => ID }) id: string,
+    @Args('input') input: UpdatePostInput,
+  ): Promise<PostDocument> {
+    return this.postsService.update(id, input);
+  }
+
+  @Mutation(() => Post)
+  @UseGuards(GqlAuthGuard)
+  publishPost(@Args('id', { type: () => ID }) id: string): Promise<PostDocument> {
+    return this.postsService.publish(id);
+  }
+
+  @Mutation(() => Post)
+  @UseGuards(GqlAuthGuard, RolesGuard)
+  @Roles('admin')
+  deletePost(@Args('id', { type: () => ID }) id: string): Promise<PostDocument> {
+    return this.postsService.remove(id);
+  }
+
+  @ResolveField(() => User)
+  async author(@Parent() post: PostDocument): Promise<User> {
+    const author = await this.usersService.findById(post.author.toString());
+    if (!author) {
+      throw new NotFoundException('Author not found');
+    }
+    return {
+      id: author.id,
+      email: author.email,
+      displayName: author.displayName,
+      role: author.role,
+    };
+  }
+}
+```
+
+- **`posts`** builds its filter from whichever `status`/`tag` args a caller actually passes — omitting `status` returns posts of every status, which is exactly right for an admin listing but not something the public site should ever do; [Public Blog](/devblog/en/public-blog/) is responsible for always passing `status: PUBLISHED` on the reader-facing side, the resolver itself stays a plain, unopinionated filter.
+- **`createPost`** reads the caller off `@CurrentUser()`, the same decorator [Auth resolver & GraphQL setup](/devblog/en/auth/auth-resolver/) used for `me` — a post's author is always the token holder, never a client-supplied field, which is why `CreatePostInput` has no `author` field at all.
+- **`updatePost`/`publishPost`/`deletePost`** all resolve or throw through `PostsService`'s own `NotFoundException`s — the resolver adds no error handling of its own, matching [Config & exceptions](/devblog/en/backend-foundations/config-exceptions/)'s "throw a built-in Nest exception, let the global filter format the response" rule.
+- **`author`** is the one method here that isn't a `@Query()`/`@Mutation()` — `@ResolveField(() => User)` only fires when a request's selection set includes `author`, and `@Parent()` hands it the exact `Post` document the parent operation already fetched, `post.author` and all.
+
+Update `apps/api/src/posts/posts.module.ts` to register the resolver and import `UsersModule` (already exporting `UsersService` since [Password hashing](/devblog/en/auth/passwords/)):
+
+```ts
+import { Module } from '@nestjs/common';
+import { MongooseModule } from '@nestjs/mongoose';
+import { Post, PostSchema } from './schemas/post.schema';
+import { PostsService } from './posts.service';
+import { PostsResolver } from './posts.resolver';
+import { UsersModule } from '../users/users.module';
+
+@Module({
+  imports: [
+    MongooseModule.forFeature([{ name: Post.name, schema: PostSchema }]),
+    UsersModule,
+  ],
+  providers: [PostsService, PostsResolver],
+})
+export class PostsModule {}
+```
+
+`PostsService`'s temporary `onModuleInit` boot check from [Mongoose connection](/devblog/en/backend-foundations/mongoose-connection/) can come out now — `posts`, `post`, and the four mutations below are a real, playground-able replacement for it, the same call [Auth resolver & GraphQL setup](/devblog/en/auth/auth-resolver/) made for `AuthService`'s equivalent hook.
+
+## Verify
+
+```bash
+npm run start:dev
+```
+
+Open `http://localhost:4000/graphql`, paste the `Authorization: Bearer <token>` header from a `register`/`login` mutation ([Auth resolver & GraphQL setup](/devblog/en/auth/auth-resolver/)) into the Sandbox's **Headers** panel, then run:
+
+```graphql
+mutation CreatePost {
+  createPost(
+    input: {
+      title: "Hello, DevBlog"
+      body: "This is the first post."
+      tags: ["nestjs", "graphql"]
+    }
+  ) {
+    id
+    slug
+    status
+    author {
+      displayName
+    }
+  }
+}
+```
+
+```txt
+{
+  "data": {
+    "createPost": {
+      "id": "...",
+      "slug": "hello-devblog",
+      "status": "DRAFT",
+      "author": { "displayName": "Ava" }
+    }
+  }
+}
+```
+
+`author.displayName` in the response confirms `@ResolveField()` ran and `UsersService.findById` resolved the `ObjectId` back to a real `User`. Now run the query without any `Authorization` header:
+
+```graphql
+query Posts {
+  posts {
+    total
+    items {
+      title
+      status
+    }
+  }
+}
+```
+
+```txt
+{
+  "data": {
+    "posts": {
+      "total": 1,
+      "items": [{ "title": "Hello, DevBlog", "status": "DRAFT" }]
+    }
+  }
+}
+```
+
+`posts` succeeds with no token at all, confirming it's genuinely open, unlike `createPost` above. Try `deletePost` with the same author token used for `createPost` and it fails — that account's `role` is `'author'`, not `'admin'`, so `RolesGuard` rejects it, confirming [Guards & roles](/devblog/en/auth/guards-roles/)'s role check is live on a real mutation now.
+
+## Recap
+
+`PostsService` now has full CRUD plus `findPage`/`findBySlug`, backed by the `Post` Mongoose schema from [Schemas](/devblog/en/data-modeling/schemas/). `PostsResolver` exposes `posts`/`post` as open queries and `createPost`/`updatePost`/`publishPost` behind `GqlAuthGuard`, with `deletePost` further restricted to `admin` via `RolesGuard` + `@Roles('admin')`. `@ResolveField(() => User) author` bridges `Post.author`'s `ObjectId` reference to a real `User` object per request — cheap at this course's scale, but a genuine N+1 risk under real list traffic, which is exactly what DataLoader exists to batch away.
+
+Next: [Tags resolver →](/devblog/en/graphql-api/tags-resolver/)
