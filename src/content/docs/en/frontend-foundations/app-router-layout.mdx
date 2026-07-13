@@ -1,0 +1,109 @@
+---
+title: App Router & layout
+description: "Build the Next.js App Router root layout — <html>/<body>, a header nav, and a footer — plus a starter globals.css, and establish the Server Component default with the 'use client' boundary."
+sidebar:
+  order: 1
+---
+
+## What we're building
+
+`apps/web/app/layout.tsx` — the **root layout** every route in this course renders inside: `<html>`/`<body>`, a header with a nav linking Home and Admin, `<main>{children}</main>`, and a footer — plus a starter `apps/web/app/globals.css`. Both files already exist as scaffold defaults from [Frontend init](/devblog/en/setup/frontend-init/); this lesson replaces their placeholder content with DevBlog's real shell. Nothing new gets installed here — just the two files every later page in `app/` sits inside of.
+
+## Why
+
+`layout.tsx` is a **Server Component**, and specifically it's the App Router's default for every file in `app/` unless that file opens with a `'use client'` directive. There's no import to add and no config flag to set to get that default — it's simply what a `.tsx` file under `app/` is until you say otherwise. That matters here concretely: the header, the nav links, and the footer in this file never ship their component code to the browser. They render once, as plain HTML, either on the server per request or — since nothing in this particular file calls a dynamic API — potentially once at build time if Next decides the route is fully static. Either way, the browser receives finished markup, not a bundle of React code that reconstructs it client-side.
+
+[Architecture](/devblog/en/introduction/architecture/) already drew the line this lesson's file conventions make concrete: the public blog pages that will render underneath this layout are Server Components fetching from the GraphQL API on the server, with ISR caching the result (Module 9). The `/admin` pages that will also render underneath this same layout are Client Components the moment they need something only the browser can give them — a JWT held in `localStorage`, an `onClick` handler, `useState` for a form (Module 10). The boundary between the two is never a separate folder or a different file extension; it is the literal presence or absence of `'use client'` as the first line of a file. This layout stays server because nothing in it needs the browser. The `Admin` link below points at a route that doesn't do anything real yet — Module 10 is where it becomes a working login screen — but the nav needs to exist now, because every later page in this course renders inside this same header and footer.
+
+## Pros & cons
+
+**Server Components (the App Router default) vs. Client Components (`'use client'`).** A Server Component can be declared `async` and `await` a data fetch directly in its body, never ships its own JavaScript to the browser, and can safely hold secrets (an API key, a database connection string) that a Client Component never could, since its code simply never leaves the server. The cost is real: no `useState`, no `useEffect`, no event handlers, no browser APIs (`window`, `localStorage`) — anything interactive is off-limits. A Client Component gets all of that back — state, effects, `onClick`, `localStorage` — at the cost of shipping its compiled code to the browser as part of the JS bundle, and it can no longer `await` a fetch directly in its render body the way a Server Component can. For DevBlog, the split falls exactly where the architecture lesson said it would: the public blog is read-only and benefits from zero client JS and cacheable HTML, so it stays server; the admin dashboard is inherently stateful and interactive — a session, a form, a client-side redirect after login — so it opts into `'use client'` deliberately, file by file, starting in Module 10.
+
+## Set it up
+
+Update `apps/web/app/globals.css` with a small starter — [Styling](/devblog/en/frontend-foundations/styling/) grows this into a real design system:
+
+```css
+* {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+  font-family: system-ui, -apple-system, 'Segoe UI', sans-serif;
+  color: #1a1a1a;
+  background: #ffffff;
+}
+
+a {
+  color: inherit;
+}
+```
+
+Create `apps/web/app/layout.tsx`:
+
+```tsx
+import type { Metadata } from 'next';
+import Link from 'next/link';
+import './globals.css';
+
+export const metadata: Metadata = {
+  title: 'DevBlog',
+  description: 'A small, real GraphQL-backed blog built with Next.js and NestJS.',
+};
+
+export default function RootLayout({
+  children,
+}: {
+  children: React.ReactNode;
+}) {
+  return (
+    <html lang="en">
+      <body>
+        <header>
+          <nav>
+            <Link href="/">DevBlog</Link>
+            <Link href="/">Home</Link>
+            <Link href="/admin">Admin</Link>
+          </nav>
+        </header>
+        <main>{children}</main>
+        <footer>
+          <p>&copy; {new Date().getFullYear()} DevBlog.</p>
+        </footer>
+      </body>
+    </html>
+  );
+}
+```
+
+- **`export const metadata`** is the App Router's file-convention replacement for a hand-written `<head>` — Next reads this object and injects the `<title>`/`<meta name="description">` tags itself. A page-level `layout.tsx` or `page.tsx` can export its own `metadata` to override these per route; nothing does yet, so every route currently shows "DevBlog".
+- **No `'use client'` anywhere in this file** — it's a Server Component by default, which is exactly why it can safely render `<main>{children}</main>` and let whatever Server or Client Component `children` turns out to be (a public post page, an admin dashboard) mount underneath it without this file itself needing to know which one it is.
+- **`new Date().getFullYear()`** runs once, wherever this file renders. Since nothing else in this layout calls a dynamic API (a fetch, a cookie read), Next may choose to prerender it once at build time — the year in the footer would then update on the next deploy, not automatically at midnight on New Year's Eve. That's a fine trade for a copyright line; it would not be fine for anything that actually needed to be live.
+
+## Verify
+
+```bash
+cd apps/web
+npm run dev
+```
+
+Open `http://localhost:3000`. You should see the header with "DevBlog", "Home", and "Admin" links, whatever the current `app/page.tsx` renders in `<main>`, and the footer with the current year.
+
+Confirm the header and footer arrived as real HTML, not client-side-rendered React, by requesting the page without a browser at all:
+
+```bash
+curl -s http://localhost:3000 | grep -o '<footer>.*</footer>'
+```
+
+```txt
+<footer><p>© 2026 DevBlog.</p></footer>
+```
+
+`curl` never executes JavaScript. Seeing the footer's markup in its raw response confirms `layout.tsx` rendered on the server — exactly what a Server Component is for.
+
+## Recap
+
+`apps/web/app/layout.tsx` is the root layout: `<html>`/`<body>`, a header nav linking Home and Admin, and a footer, all as a Server Component with no `'use client'` directive anywhere in the file. That default — every file in `app/` is a Server Component unless it opts out — is what lets this course's public blog stay server-rendered and cacheable while its admin dashboard opts into Client Components exactly where it needs browser state, starting in Module 10. `globals.css` currently holds just a reset and a system font stack; [Styling](/devblog/en/frontend-foundations/styling/) is where it grows into DevBlog's actual design system.
+
+Next: [GraphQL client & auth →](/devblog/en/frontend-foundations/graphql-client/)

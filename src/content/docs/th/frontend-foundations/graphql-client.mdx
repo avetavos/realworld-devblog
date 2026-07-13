@@ -1,0 +1,226 @@
+---
+title: GraphQL client & auth
+description: "สร้าง lib/graphql.ts ตัว fetch wrapper ที่ type ครบตัวเดียวรอบ NestJS GraphQL API พร้อมแคชแบบรู้จัก ISR และการโยน error ของ GraphQL ออกมา บวก lib/auth.ts ตัวช่วยจัดการ token สำหรับ admin"
+sidebar:
+  order: 2
+---
+
+## What we're building
+
+`apps/web/lib/graphql.ts` — ฟังก์ชัน `gqlFetch` ที่ type ครบตัวเดียว สร้างบน native `fetch` API ที่ทุกหน้าและทุก mutation ในคอร์สนี้เรียกใช้ พร้อม type ที่ใช้ร่วมกันอย่าง `Post`/`Tag`/`Comment`/`PostPage`/`Author` ที่สะท้อน schema ของ GraphQL จาก [GraphQL API](/devblog/th/graphql-api/) ควบคู่กันไป `apps/web/lib/auth.ts` — ฟังก์ชันเล็ก ๆ สามตัว `getToken`/`setToken`/`clearToken` ที่ห่อ JWT ของ admin ไว้ใน `localStorage`
+
+## Why
+
+[Frontend init](/devblog/th/setup/frontend-init/) ติดตั้ง `graphql-request` ไว้เป็น placeholder ก่อนที่โมดูลนี้จะตัดสินใจจริง ๆ ว่าฝั่งหน้าบ้านจะคุยกับ API ยังไง บทเรียนนี้ตัดสินใจนั้นจริง ๆ และคำตอบคือ native `fetch` ไม่ใช่ `graphql-request` — เป็นการแก้ไขทิศทางที่บันทึกไว้ชัดเจน ไม่ใช่การขัดแย้งแบบเงียบ ๆ `graphql-request` เองก็แทบไม่ต่างจาก wrapper บาง ๆ ที่ POST `{ query, variables }` ไปที่ endpoint เดียวแล้ว parse JSON กลับมา ซึ่งตรงกับสิ่งที่ `gqlFetch` ด้านล่างทำโดยตรงเป๊ะ ไม่มีอะไรที่สร้างด้วยมันจนถึงตอนนี้เสียเปล่า แต่ตัว package เองไม่จำเป็นอีกต่อไปเมื่อ `lib/graphql.ts` มีอยู่แล้ว `npm uninstall graphql-request` ปลอดภัยที่จะรันหลังบทเรียนนี้ — `react-markdown` และ `remark-gfm` ยังคงติดตั้งอยู่ เพราะ [Public Blog](/devblog/th/public-blog/) ยังต้องใช้มันเรนเดอร์เนื้อหา Markdown ของโพสต์
+
+เหตุผลที่เอื้อมไปหา `fetch` โดยตรงแทนที่จะใช้ GraphQL client library ใด ๆ ลงมาที่สองเรื่องที่คอร์สนี้ต้องการจริง ๆ อย่างแรกคือ **bundle size**: `gqlFetch` มีความยาวไม่ถึง 50 บรรทัดและไม่มี runtime dependency เลย จึงไม่เสียอะไรใน client bundle ที่ admin dashboard ส่งออกไป ในขณะที่ machinery ของ cache และ query-deduplication ของ GraphQL client จริง ๆ จะถูกส่งไปที่ browser แม้แต่สำหรับ server component ของบล็อกสาธารณะ ซึ่งไม่เคยต้องการ client-side cache เลยเพราะมันรันแค่ครั้งเดียวต่อ request (หรือต่อการ revalidate ของ ISR) บนเซิร์ฟเวอร์ อย่างที่สองคือ **RSC-friendliness**: Server Component สามารถ `await fetch(...)` ได้โดยตรงใน body ของมันโดยไม่ต้องตั้งค่าอะไร ในขณะที่ client library เต็มรูปแบบมักต้องการ client instance แบบ singleton และสำหรับอะไรที่เกินกว่า query พื้นฐานที่สุด ต้องมี React context `Provider` — ซึ่งตัวมันเองก็เป็น Client Component หมายความว่ามันต้องการ `'use client'` และจะบังคับให้ทุกคอมโพเนนต์ข้างใต้มันใน tree ต้องยอมรับขอบเขตนั้น ซึ่งลบล้างการแบ่ง server-by-default ที่ [App Router & layout](/devblog/th/frontend-foundations/app-router-layout/) เพิ่งวางไว้โดยตรง
+
+`gqlFetch` ยังทำอีกเรื่องหนึ่งที่ควรพูดตรง ๆ: บนเซิร์ฟเวอร์ มันตั้งค่าเริ่มต้นเป็น `cache: 'no-store'` เว้นแต่ผู้เรียกจะส่ง `revalidate` มาอย่างชัดเจน นั่นคือการเลือกเข้าร่วมอย่างจงใจ ไม่ใช่การมองข้าม — mutation ของ admin ไม่ควรถูกแคชแบบเงียบ ๆ เด็ดขาด และหน้าที่ยังไม่ได้ตัดสินใจ revalidation window ของตัวเองก็ไม่ควรได้มันมาโดยบังเอิญเพียงเพราะมันบังเอิญเรียก `gqlFetch` จาก Server Component หน้าหนึ่งจะได้ ISR ก็ต่อเมื่อมันขอมันเท่านั้น
+
+## Pros & cons
+
+**Typed fetch wrapper (ที่เราใช้) เทียบกับ Apollo Client** Apollo ให้ normalized in-memory cache ที่ใช้ร่วมกันได้ทุกคอมโพเนนต์ที่ query entity เดียวกัน, ตัวช่วย optimistic-update, DevTools, และ GraphQL subscription — ความสามารถจริง ๆ ที่คอร์สนี้ไม่ต้องการเลยสำหรับสองไคลเอนต์ (บล็อกสาธารณะ, admin dashboard) ที่ไม่ได้แชร์ live cache ข้ามคอมโพเนนต์ที่ไม่เกี่ยวข้องกัน การใช้มันใน App Router ยังหมายถึงต้องต่อสาย `@apollo/client-react-streaming` (คำตอบของ Apollo เองสำหรับการเชื่อม RSC) หรือห่อ tree ด้วย `ApolloProvider` แบบ `'use client'` ซึ่งอย่างใดอย่างหนึ่งก็เพิ่มการตั้งค่าจริงจังและ runtime ฝั่ง client ที่ไม่เล็กเลย แม้แต่สำหรับหน้าที่เป็น pure server-rendered read ล้วน ๆ `gqlFetch` มีต้นทุนแค่ไฟล์เดียวที่คุณอ่านจบได้ในหนึ่งนาที เสียบเข้ากับ Data Cache ในตัวของ Next โดยตรงผ่าน `next: { revalidate, tags }` โดยไม่ต้องตั้งค่าเพิ่ม และทำงานเหมือนกันทุกประการไม่ว่าจะถูกเรียกจาก Server Component หรือ Client Component เพราะข้างใต้มันคือ `fetch` เฉย ๆ ต้นทุนจริง ๆ คือ: ไม่มีการแคชอัตโนมัติข้ามคอมโพเนนต์ต่างตัวในการเรนเดอร์เดียวกัน — สองคอมโพเนนต์ที่เรียก `gqlFetch` แยกกันสำหรับโพสต์เดียวกันจะยิง network request สองครั้ง ในขณะที่ normalized cache ของ Apollo จะรวมมันเป็นครั้งเดียวให้ — และไม่มี type ที่ generate มาจาก schema ดังนั้น `Post`/`Tag`/`Comment` ด้านล่างจึงดูแลด้วยมือคู่กับ API แทนที่จะผลิตจากขั้นตอน codegen สำหรับโปรเจกต์คอร์สสองไคลเอนต์ การแลกนั้นคุ้มค่า แอปที่ใหญ่กว่าที่มีหลายคอมโพเนนต์อ่านข้อมูลที่ทับซ้อนกันเองอย่างอิสระจะรู้สึกถึง cache ที่หายไปมากกว่านี้
+
+## Set it up
+
+สร้าง `apps/web/lib/graphql.ts`:
+
+```ts
+export const API_URL = process.env.NEXT_PUBLIC_API_URL!;
+
+export interface GqlOptions {
+  token?: string;
+  revalidate?: number;
+  tags?: string[];
+}
+
+export interface Author {
+  displayName: string;
+}
+
+export interface Post {
+  id: string;
+  title: string;
+  slug: string;
+  body: string;
+  excerpt?: string;
+  coverImage?: string;
+  status: 'draft' | 'published';
+  tags: string[];
+  publishedAt?: string;
+  author: Author;
+}
+
+export interface Tag {
+  id: string;
+  name: string;
+  slug: string;
+}
+
+export interface Comment {
+  id: string;
+  authorName: string;
+  body: string;
+  createdAt: string;
+}
+
+export interface PostPage {
+  items: Post[];
+  total: number;
+  page: number;
+  pageSize: number;
+}
+
+interface GqlError {
+  message: string;
+}
+
+interface GqlResponse<T> {
+  data?: T;
+  errors?: GqlError[];
+}
+
+export async function gqlFetch<T>(
+  query: string,
+  variables?: Record<string, unknown>,
+  opts: GqlOptions = {},
+): Promise<T> {
+  const headers: Record<string, string> = {
+    'Content-Type': 'application/json',
+  };
+  if (opts.token) {
+    headers.Authorization = `Bearer ${opts.token}`;
+  }
+
+  const init: RequestInit = {
+    method: 'POST',
+    headers,
+    body: JSON.stringify({ query, variables }),
+  };
+
+  if (opts.revalidate !== undefined || opts.tags) {
+    init.next = {
+      ...(opts.revalidate !== undefined ? { revalidate: opts.revalidate } : {}),
+      ...(opts.tags ? { tags: opts.tags } : {}),
+    };
+  } else {
+    init.cache = 'no-store';
+  }
+
+  const res = await fetch(API_URL, init);
+  const json = (await res.json()) as GqlResponse<T>;
+
+  if (json.errors && json.errors.length > 0) {
+    throw new Error(json.errors[0].message);
+  }
+  if (!json.data) {
+    throw new Error('GraphQL response had no data');
+  }
+  return json.data;
+}
+```
+
+- **`API_URL = process.env.NEXT_PUBLIC_API_URL!`** — prefix `NEXT_PUBLIC_` จาก [Repo layout](/devblog/th/setup/repo-layout/) คือสิ่งที่ทำให้อ่านได้จากโค้ดฝั่ง client ด้วย ไม่ใช่แค่เซิร์ฟเวอร์ ส่วน non-null assertion เชื่อว่า `.env.local` ตั้งค่ามันไว้แล้ว ซึ่ง [Frontend init](/devblog/th/setup/frontend-init/) ทำไปแล้ว
+- **`Post`/`Tag`/`Comment`/`PostPage`/`Author`** เขียนด้วยมือให้สะท้อน schema จาก [GraphQL API](/devblog/th/graphql-api/) ทีละฟิลด์ props ของหน้าและคอมโพเนนต์ในโมดูลถัดไปทุกโมดูล import type พวกนี้จากไฟล์นี้โดยตรงแทนที่จะประกาศซ้ำ
+- **`Authorization` header เป็นแบบมีเงื่อนไข** — เพิ่มเข้ามาก็ต่อเมื่อผู้เรียกส่ง `token` มา ซึ่งตรงกับรูปแบบที่ `lib/auth.ts` ด้านล่างสร้างไว้ให้สำหรับการเรียกของ admin การเรียกของบล็อกสาธารณะไม่เคยส่งมันมาเลย
+- **`init.next` ถูกตั้งค่าเฉพาะเมื่อผู้เรียกขอเท่านั้น** การส่ง `{ revalidate: 60 }` คือการให้ Server Component เข้าร่วม Data Cache ของ Next เป็นเวลา 60 วินาที — ISR ของจริง การไม่ส่งอะไรเลยจะตกไปที่ `cache: 'no-store'` ดังนั้น mutation หรือการอ่านของ admin จึงไม่มีวันถูกแคชโดยบังเอิญ
+- **Error โยนออกมา ไม่ใช่คืน `undefined`** GraphQL response สามารถเป็น HTTP `200` แต่ยังพก array `errors` แทน `data` ได้ `gqlFetch` เช็คสิ่งนั้นอย่างชัดเจนแล้วโยน error ด้วยข้อความ error จริงของ GraphQL ดังนั้น error boundary ของ Server Component ที่เรียกมัน (หรือ `try`/`catch` รอบ mutation ของ Client Component) จะเห็นข้อความจริงที่อ่านได้ แทนที่จะพังแบบเงียบ ๆ ด้วย `undefined.something` ลึกลงไป สิ่งหนึ่งที่ไม่จัดการ: response ที่ไม่ใช่ 2xx จากอะไรบางอย่างที่อยู่หน้า API (เช่น proxy timeout) ที่คืน HTML แทน JSON จะโยน error ข้างใน `res.json()` เอง เป็น parse error ทั่วไปแทนที่จะเป็น error ของ GraphQL — เป็นช่องว่างที่ยอมรับได้สำหรับคอร์สนี้ และเป็นโอกาสในการ harden สำหรับ deployment จริง
+
+สร้าง `apps/web/lib/auth.ts`:
+
+```ts
+const TOKEN_KEY = 'devblog_token';
+
+export function getToken(): string | null {
+  if (typeof window === 'undefined') {
+    return null;
+  }
+  return window.localStorage.getItem(TOKEN_KEY);
+}
+
+export function setToken(token: string): void {
+  if (typeof window === 'undefined') {
+    return;
+  }
+  window.localStorage.setItem(TOKEN_KEY, token);
+}
+
+export function clearToken(): void {
+  if (typeof window === 'undefined') {
+    return;
+  }
+  window.localStorage.removeItem(TOKEN_KEY);
+}
+```
+
+- **`typeof window === 'undefined'` ป้องกันทุกฟังก์ชัน** — `lib/auth.ts` import ได้จากทุกที่ รวมถึง Server Component ที่ไม่มีวันรันใน browser เลย ถ้าไม่มีการป้องกันนี้ `window.localStorage` จะโยน error ระหว่างการเรนเดอร์บนเซิร์ฟเวอร์และทำให้หน้าพัง ซึ่งเป็นจุดพลาดเรื่อง hydration เดียวกันกับที่ convention ของคอร์สนี้เองเตือนไว้
+- **การแลกที่พูดตรง ๆ**: `localStorage` อ่านได้โดย JavaScript ใด ๆ ที่รันอยู่บนหน้านั้น รวมถึงของผู้โจมตีด้วย ถ้า DevBlog เคยมีบั๊ก XSS — cookie แบบ `httpOnly` ที่เก็บ token จะไม่มีความเสี่ยงนั้น เพราะ JavaScript ไม่มีวันอ่านค่าของ cookie แบบ `httpOnly` ได้เลย DevBlog ใช้ `localStorage` อยู่ดีเพราะฝั่งหน้าบ้านและ API เป็นแอปที่ deploy แยกกันสองตัวโดยไม่มีเส้นทาง `Set-Cookie` แบบ shared-domain ให้พึ่งพา และเพราะ admin ใน Module 10 เป็นพื้นผิวเดียวที่แตะ token นี้เลย deployment จริงที่เติบโตเกินกว่าโปรเจกต์สำหรับสอนจะขยับไปทาง JWT อายุสั้นบวก refresh token ที่เก็บใน cookie แบบ `httpOnly` และ CSP แบบ `script-src 'self'` ที่เข้มงวด — ทิศทางที่คอร์สนี้พูดตรง ๆ ว่าจำเป็น แทนที่จะแกล้งทำเป็นว่าไม่ต้องการ
+
+Server Component ที่เรียก `gqlFetch` — นี่คือรูปแบบที่ [Public Blog](/devblog/th/public-blog/) สร้างขึ้นจริงในภายหลัง ตรงนี้แค่พอพิสูจน์ว่าเลเยอร์ fetch ทำงานได้ตั้งแต่ต้นจนจบ:
+
+```tsx
+// app/page.tsx — a Server Component (no 'use client' — this file never runs in the browser)
+import { gqlFetch } from '@/lib/graphql';
+import type { PostPage } from '@/lib/graphql';
+
+const POSTS_QUERY = `
+  query Posts($status: PostStatus, $page: Int, $pageSize: Int) {
+    posts(status: $status, page: $page, pageSize: $pageSize) {
+      items {
+        id
+        title
+        slug
+        excerpt
+        coverImage
+        tags
+        publishedAt
+        author {
+          displayName
+        }
+      }
+      total
+      page
+      pageSize
+    }
+  }
+`;
+
+export default async function HomePage() {
+  const { posts } = await gqlFetch<{ posts: PostPage }>(
+    POSTS_QUERY,
+    { status: 'PUBLISHED', page: 1, pageSize: 10 },
+    { revalidate: 60 },
+  );
+
+  return (
+    <ul>
+      {posts.items.map((post) => (
+        <li key={post.id}>{post.title}</li>
+      ))}
+    </ul>
+  );
+}
+```
+
+`status: 'PUBLISHED'` ตรงกับชื่อ enum ของ GraphQL ของ `PostStatus` จาก [Draft → published](/devblog/th/content-workflow/draft-publish/) ไม่ใช่ string ตัวพิมพ์เล็ก — enum เดียวกัน เขียนแบบเดียวกับที่ `posts(status: DRAFT)` เขียนไว้แล้วในตัวอย่างของบทเรียนนั้นเอง
+
+## Verify
+
+ให้ API รันอยู่ (`npm run start:dev` ใน `apps/api`) และมีโพสต์ที่ publish แล้วอย่างน้อยหนึ่งโพสต์จาก Verify section ของโมดูลก่อนหน้า วาง snippet `HomePage` ด้านบนลงใน `apps/web/app/page.tsx` แล้ว:
+
+```bash
+cd apps/web
+npm run dev
+```
+
+เปิด `http://localhost:3000` — ชื่อโพสต์ที่ publish แล้วควรปรากฏในรายการธรรมดา นั่นยืนยันว่า `gqlFetch` ไปถึง API, parse response `200` ที่มี `data` ได้ และเรนเดอร์มันทั้งหมดบนเซิร์ฟเวอร์
+
+ตอนนี้พิสูจน์ว่า error path เป็นของจริง ไม่ใช่แค่ทฤษฎี: พิมพ์ฟิลด์ผิดใน `POSTS_QUERY` ชั่วคราว (เปลี่ยน `title` เป็น `titlee`) บันทึก แล้วรีโหลด error overlay ของ dev ของ Next ควรแสดงข้อความ error จริงของ GraphQL — ประมาณ `Cannot query field "titlee" on type "Post".` — ที่โผล่มาตรงจากบรรทัด `throw new Error(json.errors[0].message)` ด้านบน ไม่ใช่การพังทั่วไป แก้คำผิดกลับคืนหลังจากเห็นแล้ว
+
+`getToken`/`setToken`/`clearToken` ยังไม่มี UI ให้กดเลย [Admin](/devblog/th/admin/) จะสร้างฟอร์ม login ที่เรียกมันใน Module 10 ตอนนี้สิ่งเดียวที่ควรยืนยันคือการ import `lib/auth.ts` จากที่ไหนก็ตามไม่ทำให้หน้าที่คุณเพิ่งโหลดพัง ซึ่งพิสูจน์ว่า guard `typeof window` ทำหน้าที่ของมันระหว่างการเรนเดอร์บนเซิร์ฟเวอร์
+
+## Recap
+
+`gqlFetch<T>` คือฟังก์ชันเดียวที่ทุกหน้าและทุก mutation ในคอร์สนี้เรียกใช้: native `fetch` แบบ POST ไปที่ `NEXT_PUBLIC_API_URL`, `Authorization` header ที่เป็นตัวเลือก, `next: { revalidate, tags }` ที่เลือกเข้าร่วมอย่างชัดเจนสำหรับ ISR, `cache: 'no-store'` เป็นค่าเริ่มต้นในกรณีอื่น และการโยน `Error` ที่พก error message จริงของ GraphQL ทุกครั้งที่ response กลับมาพร้อม `errors` แทน `data` `lib/auth.ts` ห่อ JWT ของ admin ไว้ในตัวช่วย `localStorage` สามตัว แต่ละตัวป้องกันไม่ให้รันระหว่างการเรนเดอร์บนเซิร์ฟเวอร์ พร้อมการแลกระหว่าง `localStorage` กับ cookie แบบ `httpOnly` ที่พูดตรง ๆ แทนที่จะกลบเกลื่อน `graphql-request` จาก [Frontend init](/devblog/th/setup/frontend-init/) ไม่จำเป็นอีกต่อไปและปลอดภัยที่จะ uninstall ส่วน `react-markdown`/`remark-gfm` ยังคงอยู่สำหรับ [Public Blog](/devblog/th/public-blog/)
+
+ถัดไป: [Styling →](/devblog/th/frontend-foundations/styling/)

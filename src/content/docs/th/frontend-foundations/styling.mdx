@@ -1,0 +1,204 @@
+---
+title: Styling
+description: "ระบบ design system แบบไร้เฟรมเวิร์ก — ตัวแปร CSS สำหรับสี, spacing, และ typography ใน globals.css บวก CSS Modules สำหรับคอมโพเนนต์ — และคอมโพเนนต์ PostCard แบบ presentational"
+sidebar:
+  order: 3
+---
+
+## What we're building
+
+`apps/web/app/globals.css` เติบโตจาก reset ของ [App Router & layout](/devblog/th/frontend-foundations/app-router-layout/) ให้กลายเป็น design system เล็ก ๆ — CSS custom property สำหรับสี, spacing, และ typography บวกสไตล์จริงสำหรับ header, nav, และ footer ที่บทเรียนนั้นสร้างไว้แล้ว ควบคู่กันไป `apps/web/components/Card.module.css` และ `apps/web/components/PostCard.tsx` — คอมโพเนนต์ presentational ที่เรนเดอร์สรุปโพสต์หนึ่งรายการ
+
+## Why
+
+ชุดตัวแปร CSS ที่เขียนมือเองก็เพียงพอที่จะรักษาความสอดคล้องทางภาพของทุกหน้าและคอมโพเนนต์ในภายหลังโดยไม่ต้องเพิ่ม dependency ตอน build: งานของโมดูลนี้คือพิสูจน์ว่า App Router, เลเยอร์ข้อมูล GraphQL, และตอนนี้ระบบ styling เล็ก ๆ เข้ากันได้ทั้งหมด ไม่ใช่สอนคำศัพท์ utility-class CSS ธรรมดายังคงพกพาได้ด้วย — `globals.css` และไฟล์ `.module.css` ทำงานได้เหมือนเดิมถ้าโปรเจกต์นี้ย้ายออกจาก Next.js วันหนึ่ง ในขณะที่ config ของ Tailwind หรือ runtime ของ CSS-in-JS จะทำไม่ได้
+
+CSS Modules โดยเฉพาะแก้ปัญหาที่ plain global CSS แก้ไม่ได้: ชื่อคลาส `.card`, `.title`, และ `.excerpt` ของ `PostCard` จะชนกับคอมโพเนนต์อื่นใดก็ตามที่บังเอิญใช้ชื่อเดียวกันในไฟล์ CSS ธรรมดาของตัวเอง Next.js compile ชื่อคลาสของทุกไฟล์ `*.module.css` ให้เป็น identifier ที่ hash และ scope เฉพาะที่โดยอัตโนมัติ — `styles.card` ใน `PostCard.tsx` ไม่มีวันรั่วไปโดนหรือชนกับคลาส `.card` ที่ไม่เกี่ยวข้องกันในไฟล์อื่นเลย โดยไม่ต้องมี naming convention (BEM, prefix) มาบังคับด้วยมือ
+
+`PostCard` เองก็เป็น Server Component ด้วยเหตุผลเดียวกับที่ `layout.tsx` เป็นในบทเรียนก่อนหน้า: มันรับ props แล้วเรนเดอร์ markup โดยไม่มี state, ไม่มี event handler, และไม่มี browser API เลยแม้แต่นิดเดียว มันจึงไม่ต้องการ directive `'use client'` เลย ทุกรายการที่เรนเดอร์มัน — เริ่มที่หน้ารายการหลักของ [Public Blog](/devblog/th/public-blog/) ใน Module 9 — จะเก็บ subtree ทั้งหมดนั้นไว้บนเซิร์ฟเวอร์
+
+## Pros & cons
+
+**Plain CSS + CSS Modules (ที่เราใช้) เทียบกับ Tailwind CSS** utility class ของ Tailwind ให้คุณปรับ layout ได้โดยตรงใน JSX โดยไม่ต้องตั้งชื่ออะไรหรือออกจากไฟล์ และไฟล์ config ของมันบังคับให้ spacing/color scale สอดคล้องกันทั้งโปรเจกต์แทบจะโดยบังเอิญ เพราะทุกค่ามาจาก `tailwind.config` เดียวกันแทนที่จะพิมพ์ซ้ำด้วยมือ ต้นทุนคือ dependency จริง (ตัว Tailwind เอง, PostCSS, ไฟล์ config) และคำศัพท์ classname ที่ผู้ร่วมงานทุกคนต้องเรียนรู้ก่อนที่คอมโพเนนต์จะอ่านเข้าใจง่าย `className="flex items-center gap-4 rounded-md border p-4"` บอกอะไรน้อยกว่าตอนมองผ่าน ๆ เมื่อเทียบกับ `className={styles.card}` แม้ว่า CSS เบื้องหลัง `styles.card` จะทำงานมากกว่าก็ตาม Plain CSS + Modules ไม่มีต้นทุนอะไรเลยในการเพิ่ม — Next.js รองรับ `.module.css` โดยไม่ต้องตั้งค่าอะไรเลย — และรักษา markup ของคอมโพเนนต์ให้อ่านง่าย แลกกับไฟล์เพิ่มหนึ่งไฟล์ต่อคอมโพเนนต์ และ design system (ตัวแปร CSS ด้านล่าง) ที่ไม่มีอะไรหยุดผู้ร่วมงานจากการเมินมันแล้วพิมพ์สีใหม่ด้วยมือแทน ในขณะที่ config ของ Tailwind ทำให้การเบี่ยงเบนแบบนั้นหนีไม่พ้นได้ยากกว่า
+
+**...เทียบกับ CSS-in-JS (styled-components / Emotion)** การเก็บสไตล์ไว้ที่เดียวกับคอมโพเนนต์ที่มันเป็นของ และการ interpolate prop ตรงเข้าไปในสไตล์ได้เลย คือเสน่ห์จริงของ CSS-in-JS — ไม่ต้องเปิดไฟล์แยก ไม่ต้องคิดชื่อคลาส แทบทุก CSS-in-JS library กระแสหลักแทรกสไตล์เหล่านั้นตอน runtime ผ่าน React context และ styling engine ซึ่งหมายความว่าคอมโพเนนต์ที่ใช้มันต้องมี `'use client'` บังคับให้เกิดขอบเขตฝั่ง client แบบเดียวกับที่โมดูลนี้จงใจกันออกจาก read path ของบล็อกสาธารณะพอดี นั่นไม่ใช่ footnote เรื่อง compatibility เล็ก ๆ — มันลบล้างค่าเริ่มต้น Server Component ที่ [App Router & layout](/devblog/th/frontend-foundations/app-router-layout/) วางไว้โดยตรง CSS Module ไม่มี runtime เลยแม้แต่นิดเดียว: การแมปชื่อคลาสเกิดขึ้นตอน build time ดังนั้น `PostCard` จึงยังเป็น Server Component ที่มี CSS จริงแบบ static ไม่ใช่ Client Component ที่แสร้งทำเป็นแบบนั้น
+
+## Set it up
+
+อัปเดต `apps/web/app/globals.css`:
+
+```css
+:root {
+  /* Colors */
+  --color-bg: #ffffff;
+  --color-fg: #1a1a1a;
+  --color-muted: #6b7280;
+  --color-primary: #2563eb;
+  --color-border: #e5e7eb;
+
+  /* Spacing */
+  --space-1: 0.25rem;
+  --space-2: 0.5rem;
+  --space-3: 0.75rem;
+  --space-4: 1rem;
+  --space-6: 1.5rem;
+  --space-8: 2rem;
+
+  /* Typography */
+  --font-sans: system-ui, -apple-system, 'Segoe UI', sans-serif;
+  --text-sm: 0.875rem;
+  --text-base: 1rem;
+  --text-lg: 1.25rem;
+  --text-xl: 1.5rem;
+  --line-height-body: 1.6;
+
+  /* Radius */
+  --radius-md: 0.5rem;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+  font-family: var(--font-sans);
+  font-size: var(--text-base);
+  line-height: var(--line-height-body);
+  color: var(--color-fg);
+  background: var(--color-bg);
+}
+
+a {
+  color: inherit;
+  text-decoration: none;
+}
+
+header {
+  border-bottom: 1px solid var(--color-border);
+  padding: var(--space-4) var(--space-6);
+}
+
+header nav {
+  display: flex;
+  gap: var(--space-4);
+  align-items: center;
+}
+
+header nav a:hover {
+  color: var(--color-primary);
+}
+
+main {
+  padding: var(--space-6);
+  max-width: 720px;
+  margin: 0 auto;
+}
+
+footer {
+  border-top: 1px solid var(--color-border);
+  padding: var(--space-4) var(--space-6);
+  color: var(--color-muted);
+  font-size: var(--text-sm);
+}
+```
+
+- **ส่วน `:root` คือ design system ทั้งหมด** — สีห้าตัว, spacing หกขั้น, และ type scale เล็ก ๆ ทุกคอมโพเนนต์ที่สร้างจากนี้ไปจะเอื้อมไปหา `var(--color-border)` หรือ `var(--space-4)` แทนที่จะพิมพ์ `#e5e7eb` หรือ `1rem` ซ้ำ การเปลี่ยนค่าตรงนี้เปลี่ยนมันทุกที่พร้อมกันทันที
+- **`header`, `header nav`, และ `footer`** จัดสไตล์ให้กับ element เดียวกับที่ [App Router & layout](/devblog/th/frontend-foundations/app-router-layout/) เขียนลงใน `layout.tsx` ไปแล้ว — ไม่มีอะไรใน markup ของไฟล์นั้นเปลี่ยนเลย มีแค่หน้าตาของมันเท่านั้นที่เปลี่ยน
+
+สร้าง `apps/web/components/Card.module.css`:
+
+```css
+.card {
+  display: block;
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-md);
+  padding: var(--space-4);
+  margin-bottom: var(--space-4);
+}
+
+.card:hover {
+  border-color: var(--color-primary);
+}
+
+.cover {
+  width: 100%;
+  border-radius: var(--radius-md);
+  margin-bottom: var(--space-3);
+}
+
+.title {
+  font-size: var(--text-lg);
+  margin: 0 0 var(--space-2);
+}
+
+.excerpt {
+  color: var(--color-muted);
+  margin: 0 0 var(--space-3);
+}
+
+.meta {
+  display: flex;
+  gap: var(--space-3);
+  font-size: var(--text-sm);
+  color: var(--color-muted);
+}
+```
+
+สร้าง `apps/web/components/PostCard.tsx`:
+
+```tsx
+import Link from 'next/link';
+import styles from './Card.module.css';
+import type { Post } from '@/lib/graphql';
+
+interface PostCardProps {
+  post: Pick<Post, 'title' | 'slug' | 'excerpt' | 'coverImage' | 'tags' | 'publishedAt'>;
+}
+
+export function PostCard({ post }: PostCardProps) {
+  return (
+    <Link href={`/posts/${post.slug}`} className={styles.card}>
+      {post.coverImage && <img className={styles.cover} src={post.coverImage} alt="" />}
+      <h2 className={styles.title}>{post.title}</h2>
+      {post.excerpt && <p className={styles.excerpt}>{post.excerpt}</p>}
+      <div className={styles.meta}>
+        {post.publishedAt && <time dateTime={post.publishedAt}>{post.publishedAt}</time>}
+        {post.tags.length > 0 && <span>{post.tags.join(', ')}</span>}
+      </div>
+    </Link>
+  );
+}
+```
+
+- **`Pick<Post, ...>`** เอาแค่ฟิลด์ที่การ์ดเรนเดอร์จริง ๆ ตรงจาก type `Post` ที่ใช้ร่วมกันใน [GraphQL client & auth](/devblog/th/frontend-foundations/graphql-client/) — query ที่ตัด `body` หรือ `status` ออกก็ยังตอบสนอง prop type นี้ได้พอดี เพราะการ์ดไม่เคยตั้งใจจะเรนเดอร์ทั้งสองอย่างอยู่แล้ว
+- **ไม่มี `'use client'`** — `PostCard` เรนเดอร์ `<Link>` คอมโพเนนต์ของ Next.js ที่บังเอิญเป็น Client Component ข้างใน แต่ Server Component สามารถเรนเดอร์ Client Component เป็น child ธรรมดาได้ นั่นคือวิธีมาตรฐานที่ทั้งสองแบบสอดประสานกัน `PostCard` เองยังคงเป็น server ตลอด
+- **ใช้ `<img>` ธรรมดา ไม่ใช่ `next/image` อย่างจงใจ** `next/image` ต้องการ allow-list ทุก remote domain ที่ `coverImage` อาจมาจากใน `next.config.ts` และคอร์สนี้ไม่รู้ล่วงหน้าว่าผู้เขียนจะวาง domain ไหนลงไป `<img>` ธรรมดาใช้ได้กับทุกอย่าง การสลับไปใช้ `next/image` เมื่อชุด domain ที่อนุญาตถูกตัดสินใจแล้วเป็นการเปลี่ยนแบบ drop-in ทีหลัง ไม่ใช่การเขียนใหม่
+- **`alt=""`** ว่างเปล่าอย่างจงใจ — `Post` ยังไม่มี model สำหรับ alt text ช่องว่างที่ระบุไว้ชัดเจน ไม่ใช่การมองข้าม deployment จริงจะเพิ่มฟิลด์ `Post.coverImageAlt` แล้วร้อยมันเข้ามาตรงนี้
+
+## Verify
+
+ต่อจาก `apps/web/app/page.tsx` ชั่วคราวจาก [GraphQL client & auth](/devblog/th/frontend-foundations/graphql-client/) สลับ `<li>` เป็นคอมโพเนนต์ใหม่:
+
+```tsx
+import { PostCard } from '@/components/PostCard';
+// ...inside the returned JSX:
+<ul>
+  {posts.items.map((post) => (
+    <PostCard key={post.id} post={post} />
+  ))}
+</ul>
+```
+
+```bash
+cd apps/web
+npm run dev
+```
+
+เปิด `http://localhost:3000` แล้วเปิด element inspector ของ browser บนการ์ดหนึ่งใบ คลาสที่เรนเดอร์ควรมีหน้าตาแบบ `Card_card__<hash>` (hash จริงต่างกันไปตาม build) แทนที่จะเป็น `card` เฉย ๆ — นั่นคือ scoping ของ CSS Modules ทำหน้าที่ของมัน ยืนยันว่าสีขอบของการ์ดตรงกับ `--color-border` จาก `globals.css` และมันเปลี่ยนเป็นสีน้ำเงิน `--color-primary` ตอน hover ซึ่งพิสูจน์ว่าตัวแปร CSS ไหลจาก design system เข้าไปในคอมโพเนนต์จริง ไม่ใช่การพิมพ์ค่าซ้ำสองที่
+
+## Recap
+
+`globals.css` ตอนนี้มี design system ทั้งหมดของ DevBlog — ตัวแปรสีห้าตัว, spacing scale หกขั้น, และ type scale เล็ก ๆ — บวกสไตล์จริงสำหรับ header, nav, และ footer ที่ `layout.tsx` จัดโครงสร้างไว้แล้ว `PostCard` เป็น Server Component ที่อ่าน subset ของ type `Post` ที่ใช้ร่วมกันผ่าน `Pick` จัดสไตล์ผ่านชื่อคลาสที่ scope อัตโนมัติของ `Card.module.css` พร้อมการแลกทั้งสองเรื่อง — `<img>` ธรรมดาแทน `next/image` และ `alt` text ที่ว่างเปล่า — ถูกระบุไว้ชัดเจนแทนที่จะซ่อนไว้ [Public Blog](/devblog/th/public-blog/) คือจุดที่คอมโพเนนต์นี้, layout, และ `gqlFetch` มารวมกันในหน้ารายการหลัก, หน้าโพสต์, และหน้าแท็กจริง
+
+ถัดไป: [Public Blog →](/devblog/th/public-blog/)

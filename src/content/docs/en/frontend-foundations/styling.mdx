@@ -1,0 +1,204 @@
+---
+title: Styling
+description: "A framework-free design system — CSS variables for color, spacing, and typography in globals.css, plus CSS Modules for components — and a PostCard presentational component."
+sidebar:
+  order: 3
+---
+
+## What we're building
+
+`apps/web/app/globals.css` grows from [App Router & layout](/devblog/en/frontend-foundations/app-router-layout/)'s reset into a small design system — CSS custom properties for color, spacing, and typography, plus real styles for the header, nav, and footer that lesson already built. Alongside it, `apps/web/components/Card.module.css` and `apps/web/components/PostCard.tsx` — a presentational component that renders one post summary.
+
+## Why
+
+A hand-rolled set of CSS variables is enough to keep every later page and component visually consistent without adding a build-time dependency: this module's job is to prove the App Router, the GraphQL data layer, and now a small styling system all fit together, not to teach a utility-class vocabulary. Plain CSS also stays portable — `globals.css` and a `.module.css` file work unchanged if this project ever moved off Next.js, where a Tailwind config or a CSS-in-JS runtime would not.
+
+CSS Modules specifically solve a problem plain global CSS doesn't: `PostCard`'s `.card`, `.title`, and `.excerpt` class names would collide with any other component that happened to reuse the same names in its own plain CSS file. Next.js compiles every `*.module.css` file's class names into locally-scoped, hashed identifiers automatically — `styles.card` in `PostCard.tsx` can never leak into or clash with an unrelated `.card` class in some other file, with no naming convention (BEM, prefixing) required to enforce it by hand.
+
+`PostCard` itself is a Server Component, for the same reason `layout.tsx` was in the previous lesson: it takes props and renders markup, with no state, no event handler, and no browser API anywhere in it, so it needs no `'use client'` directive at all. Every list that renders it — starting with [Public Blog](/devblog/en/public-blog/)'s home list in Module 9 — keeps that entire subtree on the server.
+
+## Pros & cons
+
+**Plain CSS + CSS Modules (what we're using) vs. Tailwind CSS.** Tailwind's utility classes let you iterate on a layout directly in JSX without naming anything or leaving the file, and its config file enforces one consistent spacing/color scale project-wide almost by accident, since every value comes from the same `tailwind.config` rather than being retyped by hand. The cost is a real dependency (Tailwind itself, PostCSS, a config file) and a class-name vocabulary every contributor has to learn before a component reads clearly; `className="flex items-center gap-4 rounded-md border p-4"` says less at a glance than `className={styles.card}` does, even though the CSS behind `styles.card` is doing more. Plain CSS + Modules costs nothing to add — Next.js supports `.module.css` with zero configuration — and keeps a component's markup readable, at the price of one extra file per component and a design system (the CSS variables below) that nothing stops a contributor from ignoring and hand-typing a new color anyway; Tailwind's config makes that same drift harder to get away with.
+
+**...vs. CSS-in-JS (styled-components / Emotion).** Co-locating styles with the component they belong to, and being able to interpolate a prop straight into a style, is CSS-in-JS's real appeal — no separate file to open, no class name to invent. Almost every mainstream CSS-in-JS library injects those styles at runtime through a React context and a styling engine, which means the component using it needs `'use client'`, forcing exactly the client-side boundary this module has been deliberately keeping out of the public blog's read path. That's not a small compatibility footnote — it directly undoes the Server Component default [App Router & layout](/devblog/en/frontend-foundations/app-router-layout/) established. A CSS Module has no runtime at all: the class-name mapping happens at build time, so `PostCard` stays a Server Component with real, static CSS, not a Client Component pretending to look like one.
+
+## Set it up
+
+Update `apps/web/app/globals.css`:
+
+```css
+:root {
+  /* Colors */
+  --color-bg: #ffffff;
+  --color-fg: #1a1a1a;
+  --color-muted: #6b7280;
+  --color-primary: #2563eb;
+  --color-border: #e5e7eb;
+
+  /* Spacing */
+  --space-1: 0.25rem;
+  --space-2: 0.5rem;
+  --space-3: 0.75rem;
+  --space-4: 1rem;
+  --space-6: 1.5rem;
+  --space-8: 2rem;
+
+  /* Typography */
+  --font-sans: system-ui, -apple-system, 'Segoe UI', sans-serif;
+  --text-sm: 0.875rem;
+  --text-base: 1rem;
+  --text-lg: 1.25rem;
+  --text-xl: 1.5rem;
+  --line-height-body: 1.6;
+
+  /* Radius */
+  --radius-md: 0.5rem;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+  font-family: var(--font-sans);
+  font-size: var(--text-base);
+  line-height: var(--line-height-body);
+  color: var(--color-fg);
+  background: var(--color-bg);
+}
+
+a {
+  color: inherit;
+  text-decoration: none;
+}
+
+header {
+  border-bottom: 1px solid var(--color-border);
+  padding: var(--space-4) var(--space-6);
+}
+
+header nav {
+  display: flex;
+  gap: var(--space-4);
+  align-items: center;
+}
+
+header nav a:hover {
+  color: var(--color-primary);
+}
+
+main {
+  padding: var(--space-6);
+  max-width: 720px;
+  margin: 0 auto;
+}
+
+footer {
+  border-top: 1px solid var(--color-border);
+  padding: var(--space-4) var(--space-6);
+  color: var(--color-muted);
+  font-size: var(--text-sm);
+}
+```
+
+- **The `:root` block is the whole design system** — five colors, six spacing steps, and a small type scale. Every component built from here on reaches for `var(--color-border)` or `var(--space-4)` instead of retyping `#e5e7eb` or `1rem`; changing a value here changes it everywhere at once.
+- **`header`, `header nav`, and `footer`** style the exact elements [App Router & layout](/devblog/en/frontend-foundations/app-router-layout/) already wrote into `layout.tsx` — nothing about that file's markup changes, only how it looks.
+
+Create `apps/web/components/Card.module.css`:
+
+```css
+.card {
+  display: block;
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-md);
+  padding: var(--space-4);
+  margin-bottom: var(--space-4);
+}
+
+.card:hover {
+  border-color: var(--color-primary);
+}
+
+.cover {
+  width: 100%;
+  border-radius: var(--radius-md);
+  margin-bottom: var(--space-3);
+}
+
+.title {
+  font-size: var(--text-lg);
+  margin: 0 0 var(--space-2);
+}
+
+.excerpt {
+  color: var(--color-muted);
+  margin: 0 0 var(--space-3);
+}
+
+.meta {
+  display: flex;
+  gap: var(--space-3);
+  font-size: var(--text-sm);
+  color: var(--color-muted);
+}
+```
+
+Create `apps/web/components/PostCard.tsx`:
+
+```tsx
+import Link from 'next/link';
+import styles from './Card.module.css';
+import type { Post } from '@/lib/graphql';
+
+interface PostCardProps {
+  post: Pick<Post, 'title' | 'slug' | 'excerpt' | 'coverImage' | 'tags' | 'publishedAt'>;
+}
+
+export function PostCard({ post }: PostCardProps) {
+  return (
+    <Link href={`/posts/${post.slug}`} className={styles.card}>
+      {post.coverImage && <img className={styles.cover} src={post.coverImage} alt="" />}
+      <h2 className={styles.title}>{post.title}</h2>
+      {post.excerpt && <p className={styles.excerpt}>{post.excerpt}</p>}
+      <div className={styles.meta}>
+        {post.publishedAt && <time dateTime={post.publishedAt}>{post.publishedAt}</time>}
+        {post.tags.length > 0 && <span>{post.tags.join(', ')}</span>}
+      </div>
+    </Link>
+  );
+}
+```
+
+- **`Pick<Post, ...>`** takes only the fields a card actually renders, straight from the shared `Post` type in [GraphQL client & auth](/devblog/en/frontend-foundations/graphql-client/) — a query that omits `body` or `status` can still satisfy this prop type exactly, since a card was never going to render either one.
+- **No `'use client'`** — `PostCard` renders `<Link>`, a Next.js component that happens to be a Client Component internally, but a Server Component is allowed to render a Client Component as a normal child; that's the standard way the two interleave. `PostCard` itself stays server the whole time.
+- **Plain `<img>`, not `next/image`, deliberately.** `next/image` requires allow-listing every remote domain a `coverImage` might come from in `next.config.ts`, and this course doesn't know in advance which domain an author will paste in. A plain `<img>` works with anything; swapping in `next/image` once the set of allowed domains is decided is a drop-in change later, not a rewrite.
+- **`alt=""`** is deliberately empty — `Post` doesn't model alt text yet. A named gap, not an oversight: a real deployment would add an `Post.coverImageAlt` field and thread it through here.
+
+## Verify
+
+Continuing the temporary `apps/web/app/page.tsx` from [GraphQL client & auth](/devblog/en/frontend-foundations/graphql-client/), swap the `<li>` for the new component:
+
+```tsx
+import { PostCard } from '@/components/PostCard';
+// ...inside the returned JSX:
+<ul>
+  {posts.items.map((post) => (
+    <PostCard key={post.id} post={post} />
+  ))}
+</ul>
+```
+
+```bash
+cd apps/web
+npm run dev
+```
+
+Open `http://localhost:3000` and open your browser's element inspector on a card. The rendered class should look like `Card_card__<hash>` (the exact hash varies by build) rather than plain `card` — that's CSS Modules' scoping doing its job. Confirm the card's border color matches `--color-border` from `globals.css`, and that it turns `--color-primary` blue on hover, proving the CSS variables are flowing from the design system into the component, not hard-coded twice.
+
+## Recap
+
+`globals.css` now holds DevBlog's whole design system — five color variables, a six-step spacing scale, and a small type scale — plus real styles for the header, nav, and footer `layout.tsx` already structured. `PostCard` is a Server Component reading a `Pick`ed subset of the shared `Post` type, styled through `Card.module.css`'s automatically-scoped class names, with the plain-`<img>`-over-`next/image` and empty-`alt`-text trade-offs both named rather than hidden. [Public Blog](/devblog/en/public-blog/) is where this component, the layout, and `gqlFetch` all come together in the real home list, post page, and tag pages.
+
+Next: [Public Blog →](/devblog/en/public-blog/)
